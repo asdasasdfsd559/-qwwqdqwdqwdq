@@ -35,8 +35,9 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
         tiles=None
     )
 
+    # ==================== 【已修复】2026可用高德街道图 ====================
     folium.TileLayer(
-        tiles='https://wprd01.is.autonaptai.com/appmaptile?lang=zh_cn&size=1&scale=2&style=8&x={x}&y={y}&z={z}',
+        tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
         attr='高德-2026最新街道', name='街道图(2026)'
     ).add_to(m)
 
