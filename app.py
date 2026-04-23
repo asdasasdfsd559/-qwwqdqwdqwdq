@@ -28,7 +28,7 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 地图 ====================
+# ==================== 地图（真正卫星图） ====================
 def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system,temp_points):
     m=folium.Map(
         location=[center_lat,center_lng],
@@ -37,29 +37,29 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
         tiles=None
     )
 
-    # 高德街道图（2026可用）
+    # 高德街道图
     folium.TileLayer(
         tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-        attr='高德-2026街道', name='街道图'
+        attr='高德街道', name='街道图'
     ).add_to(m)
 
-    # 谷歌卫星地图（稳定不偏移）
+    # ✅ 真正高清卫星图（国内可加载，不偏移）
     folium.TileLayer(
-        tiles='https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}',
-        attr='Google卫星', name='卫星图(超清)'
+        tiles='https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+        attr='高德卫星图', name='卫星图(超清)'
     ).add_to(m)
 
-    # 起飞点（HOME 起点）
+    # 起飞点 HOME
     if home_point:
         h_lng,h_lat=home_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker(
             [h_lat,h_lng],
             icon=folium.Icon(color='green', icon='home'),
-            popup="【起飞点】南京科技职业学院"
+            popup="起飞点 HOME"
         ).add_to(m)
         folium.Circle(radius=50, location=[h_lat,h_lng], color='green', fill=True).add_to(m)
 
-    # 航线 + 起点 → 终点
+    # 航线 + 终点标记
     if waypoints:
         pts = []
         for i, wp in enumerate(waypoints):
@@ -69,9 +69,9 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
                 folium.Marker(
                     [w_lat, w_lng],
                     icon=folium.Icon(color='red', icon='flag'),
-                    popup="【终点】"
+                    popup="终点"
                 ).add_to(m)
-        folium.PolyLine(pts, color='blue', weight=5).add_to(m)
+        folium.PolyLine(pts, color='blue', weight=4).add_to(m)
 
     # 障碍物
     for ob in obstacles:
@@ -84,7 +84,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
             popup=f"{ob['name']} | {ob['height']}m"
         ).add_to(m)
 
-    # 圈选打点
+    # 临时打点
     for lng,lat in temp_points:
         folium.CircleMarker(location=[lat,lng],radius=5,color='red',fill=True).add_to(m)
 
@@ -112,13 +112,12 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 初始化（学校正确坐标！） ====================
+# ==================== 学校正确坐标 ====================
 if 'page' not in st.session_state:
     st.session_state.page="飞行监控"
 
 loaded = load_state()
 
-# ✅ 正确：南京科技职业学院 真实坐标
 OFFICIAL_LNG = 118.7493
 OFFICIAL_LAT = 32.2340
 
@@ -152,7 +151,7 @@ with st.sidebar:
         st.session_state.coord_system=st.selectbox(
             "坐标系",["gcj02","wgs84"],format_func=lambda x:"GCJ02(国内标准)" if x=="gcj02" else "WGS84(GPS)"
         )
-        st.subheader("🏠 起飞点（HOME）")
+        st.subheader("🏠 起飞点")
         hlng=st.number_input("经度",value=st.session_state.home_point[0],format="%.6f")
         hlat=st.number_input("纬度",value=st.session_state.home_point[1],format="%.6f")
         if st.button("更新起飞点"):
@@ -160,7 +159,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-        st.subheader("✈️ 航线点")
+        st.subheader("✈️ 航线")
         alng=st.number_input("A经度",value=st.session_state.a_point[0],format="%.6f")
         alat=st.number_input("A纬度",value=st.session_state.a_point[1],format="%.6f")
         blng=st.number_input("B经度",value=st.session_state.b_point[0],format="%.6f")
@@ -178,7 +177,7 @@ with st.sidebar:
                 save_state()
                 st.rerun()
 
-        st.subheader("🚧 圈选障碍物")
+        st.subheader("🚧 障碍物")
         st.write(f"已打点：{len(st.session_state.draw_points)}")
         height=st.number_input("高度(m)",1,500,25)
         name=st.text_input("名称","教学楼")
@@ -203,7 +202,6 @@ with st.sidebar:
 if "飞行监控" in st.session_state.page:
     st.header("📡 飞行监控")
 
-    # ==================== 你要的心跳（完全不动） ====================
     if "heartbeat_data" not in st.session_state:
         st.session_state.heartbeat_data = []
         st.session_state.seq = 0
@@ -242,8 +240,7 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（南京科院）")
-    st.success("✅ 街道图 | ✅ 谷歌卫星 | ✅ 起飞点 | ✅ 终点 | ✅ 无偏移")
+    st.header("🗺️ 航线规划")
 
     clng, clat = st.session_state.home_point
 
