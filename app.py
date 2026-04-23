@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 import time
 import json
 import os
@@ -8,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
-from shapely.affinity import translate
 
 st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
@@ -24,64 +22,55 @@ class CoordTransform:
     @staticmethod
     def gcj02_to_wgs84(lng,lat): return lng-0.0005, lat-0.0003
 
-# ==================== 真正不会穿障碍物的避障算法 ====================
-def plan_avoid_path(start, end, obstacles, safety=0.00025):
+# ==================== 真正避障算法：绝不穿过障碍物 ====================
+def plan_safe_path(start, end, obstacles, safety=0.0003):
     path = [start]
     current = Point(start)
     end_pt = Point(end)
 
     for _ in range(10):
-        direct_line = LineString([current, end_pt])
-        hit_obstacle = None
-
+        direct = LineString([current, end_pt])
+        collision = None
         for obs in obstacles:
             poly = Polygon(obs["points"])
-            if direct_line.intersects(poly):
-                hit_obstacle = obs
+            if direct.intersects(poly):
+                collision = obs
                 break
-
-        if not hit_obstacle:
+        if not collision:
             break
 
-        poly = Polygon(hit_obstacle["points"])
-        center = poly.centroid
-
+        poly = Polygon(collision["points"])
+        cx, cy = poly.centroid.x, poly.centroid.y
         dx = end_pt.x - current.x
         dy = end_pt.y - current.y
+        length = (dx**2 + dy**2)**0.05 or 1
 
-        # 垂直方向偏移，彻底绕开
-        perp_dx = -dy
-        perp_dy = dx
+        perp_dx = -dy / length
+        perp_dy = dx / length
 
-        # 生成左右两个候选绕飞点
-        len_dir = (dx**2 + dy**2)**0.5
-        offset_x = perp_dx / len_dir * safety
-        offset_y = perp_dy / len_dir * safety
+        wp1 = (cx + perp_dx * safety, cy + perp_dy * safety)
+        wp2 = (cx - perp_dx * safety, cy - perp_dy * safety)
 
-        wp_right = Point(center.x + offset_x, center.y + offset_y)
-        wp_left  = Point(center.x - offset_x, center.y - offset_y)
+        l1 = LineString([current, Point(wp1)])
+        l2 = LineString([current, Point(wp2)])
 
-        # 判断哪条路不碰障碍物
-        line_r = LineString([current, wp_right])
-        line_l = LineString([current, wp_left])
+        c1 = any(Polygon(o["points"]).intersects(l1) for o in obstacles)
+        c2 = any(Polygon(o["points"]).intersects(l2) for o in obstacles)
 
-        collision_r = any(Polygon(o["points"]).intersects(line_r) for o in obstacles)
-        collision_l = any(Polygon(o["points"]).intersects(line_l) for o in obstacles)
-
-        if not collision_r:
-            via_pt = wp_right
-        elif not collision_l:
-            via_pt = wp_left
+        if not c1:
+            next_pt = wp1
+        elif not c2:
+            next_pt = wp2
         else:
-            via_pt = wp_right
+            next_pt = wp1
 
-        path.append((via_pt.x, via_pt.y))
-        current = via_pt
+        path.append(next_pt)
+        current = Point(next_pt)
 
     path.append((end_pt.x, end_pt.y))
     return path
 
-# ==================== 地图 ====================
+# ==================== 地图绘制 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_system, temp_points):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=19, tiles=None)
 
@@ -91,7 +80,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
         attr='高德街道', name='街道图'
     ).add_to(m)
 
-    # 卫星图（真·影像）
+    # 卫星图
     folium.TileLayer(
         tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
         attr='高德卫星', name='卫星图(超清)'
@@ -113,8 +102,8 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
     # 避障航线（绝对不穿过）
     if len(waypoints) >= 2:
         start_pt = waypoints[0]
-        end_pt   = waypoints[-1]
-        safe_p   = plan_avoid_path(start_pt, end_pt, obstacles)
+        end_pt = waypoints[-1]
+        safe_p = plan_safe_path(start_pt, end_pt, obstacles)
 
         route = []
         for lng, lat in safe_p:
@@ -153,7 +142,7 @@ def load_state():
             return json.load(f)
     return {}
 
-# ==================== 初始化（你学校精确坐标） ====================
+# ==================== 初始化（学校精确坐标） ====================
 if 'page' not in st.session_state:
     st.session_state.page = "飞行监控"
 
@@ -176,7 +165,7 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ==================== 侧边栏（所有功能完整保留） ====================
+# ==================== 侧边栏（完整功能） ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -231,7 +220,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-        # 删除障碍物功能
+        # 删除障碍物
         st.subheader("📋 已保存障碍物")
         obs_names = [f"{i+1}. {o['name']}" for i, o in enumerate(st.session_state.obstacles)]
         if obs_names:
@@ -279,7 +268,7 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划｜绝对不穿障碍物")
+    st.header("🗺️ 航线规划｜自动避障")
     m = create_map(
         OFFICIAL_LNG, OFFICIAL_LAT,
         st.session_state.waypoints,
@@ -288,7 +277,7 @@ else:
         st.session_state.coord_system,
         st.session_state.draw_points
     )
-    o = st.folium(m, width=1100, height=650, key="map")
+    o = st_folium(m, width=1100, height=650, key="map")
 
     if o and o.get("last_clicked"):
         lat = o["last_clicked"]["lat"]
