@@ -22,7 +22,7 @@ class CoordTransform:
         return lng + 0.0005, lat + 0.0003
     @staticmethod
     def gcj02_to_wgs84(lng, lat):
-        return lng - 0.0005, lat - 0.0003
+        return lng - 0.0005, lat - 0.0005
 
 # ==================== 避障：绝不穿过障碍物 ====================
 def compute_safe_path(start, end, obstacles):
@@ -50,12 +50,12 @@ def compute_safe_path(start, end, obstacles):
         perp_dy = dx
         wp = (cx + perp_dx * safety, cy + perp_dy * safety)
         path.append(wp)
-        = Point(wp)
+        current = Point(wp)
 
     path.append((target.x, target.y))
     return path
 
-# ==================== 地图（修复所有错误） ====================
+# ==================== 地图 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_system, temp_points):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=19)
 
