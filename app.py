@@ -28,38 +28,38 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 地图（真正卫星图） ====================
+# ==================== 地图 ====================
 def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system,temp_points):
     m=folium.Map(
         location=[center_lat,center_lng],
-        zoom_start=18,
+        zoom_start=19,
         control_scale=True,
         tiles=None
     )
 
-    # 高德街道图
+    # 高德街道
     folium.TileLayer(
         tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
         attr='高德街道', name='街道图'
     ).add_to(m)
 
-    # ✅ 真正高清卫星图（国内可加载，不偏移）
+    # 高清卫星图（真实影像）
     folium.TileLayer(
         tiles='https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-        attr='高德卫星图', name='卫星图(超清)'
+        attr='高德卫星', name='卫星图(超清)'
     ).add_to(m)
 
-    # 起飞点 HOME
+    # 起飞点
     if home_point:
         h_lng,h_lat=home_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker(
             [h_lat,h_lng],
             icon=folium.Icon(color='green', icon='home'),
-            popup="起飞点 HOME"
+            popup="南京科技职业学院·起飞点"
         ).add_to(m)
-        folium.Circle(radius=50, location=[h_lat,h_lng], color='green', fill=True).add_to(m)
+        folium.Circle(radius=40, location=[h_lat,h_lng], color='green', fill=True).add_to(m)
 
-    # 航线 + 终点标记
+    # 航线 + 终点
     if waypoints:
         pts = []
         for i, wp in enumerate(waypoints):
@@ -84,7 +84,6 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
             popup=f"{ob['name']} | {ob['height']}m"
         ).add_to(m)
 
-    # 临时打点
     for lng,lat in temp_points:
         folium.CircleMarker(location=[lat,lng],radius=5,color='red',fill=True).add_to(m)
 
@@ -112,20 +111,21 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 学校正确坐标 ====================
+# ==================== 【精准官方坐标】南京科技职业学院 ====================
 if 'page' not in st.session_state:
     st.session_state.page="飞行监控"
 
 loaded = load_state()
 
-OFFICIAL_LNG = 118.7493
-OFFICIAL_LAT = 32.2340
+# 你学校官方精确坐标（葛关路625号）
+OFFICIAL_LNG = 118.749413
+OFFICIAL_LAT = 32.234097
 
 defaults = {
     "home_point": (OFFICIAL_LNG, OFFICIAL_LAT),
     "waypoints": [],
     "a_point": (OFFICIAL_LNG, OFFICIAL_LAT),
-    "b_point": (OFFICIAL_LNG + 0.0012, OFFICIAL_LAT + 0.0008),
+    "b_point": (OFFICIAL_LNG + 0.0006, OFFICIAL_LAT + 0.0004),
     "coord_system": "gcj02",
     "obstacles": [],
     "draw_points": [],
@@ -258,7 +258,7 @@ else:
 
     if o and o.get("last_clicked"):
         lat = o["last_clicked"]["lat"]
-        lng = o["last_clicked"]["lng"]
+        lng = o["last_clicked"]["lat"]
         pt = (round(lng,6), round(lat,6))
         if pt != st.session_state.last_click:
             st.session_state.last_click = pt
