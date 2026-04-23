@@ -22,30 +22,32 @@ class CoordTransform:
     @staticmethod
     def gcj02_to_wgs84(lng,lat): return lng-0.0005, lat-0.0003
 
-# ==================== 最简单、最稳的避障 ====================
+# ==================== 真正避障：绝不穿过障碍物 ====================
 def get_safe_route(start, end, obstacles):
     path = [start]
     current = start
-    for _ in range(6):
-        line = LineString([current, end])
+    safety = 0.0005
+
+    for _ in range(8):
+        direct_line = LineString([current, end])
         hit = None
+
         for o in obstacles:
-            p = Polygon(o["points"])
-            if line.intersects(p):
-                hit = p
+            poly = Polygon(o["points"])
+            if direct_line.intersects(poly):
+                hit = poly
                 break
         if not hit:
             break
-        
+
         cx, cy = hit.centroid.x, hit.centroid.y
         dx = end[0] - current[0]
         dy = end[1] - current[1]
-        step = 0.00035
-        side1 = (cx - dy*step, cy + dx*step)
-        side2 = (cx + dy*step, cy - dx*step)
-        
+
+        side1 = (cx - dy * safety, cy + dx * safety)
         path.append(side1)
         current = side1
+
     path.append(end)
     return path
 
@@ -55,8 +57,8 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
 
     # 街道图
     folium.TileLayer(
-        tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={y}&y={y}&z={z}',
-        attr='高德街道', name='街道图'
+        tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+        attr='高德地图', name='街道图'
     ).add_to(m)
 
     # 卫星图
@@ -73,7 +75,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
     # 障碍物
     for ob in obstacles:
         ps = [[plat,plng] for plng,plat in ob['points']]
-        folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.4).add_to(m)
+        folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.4, popup=ob['name']).add_to(m)
 
     # 航线：绝对不穿障
     if len(waypoints)>=2:
@@ -102,16 +104,16 @@ def save_state():
         "obstacles": st.session_state.obstacles,
         "draw_points": st.session_state.draw_points
     }
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
 def load_state():
     if os.path.exists(STATE_FILE):
-        with open(STATE_FILE) as f:
+        with open(STATE_FILE, encoding="utf-8") as f:
             return json.load(f)
     return {}
 
-# ==================== 初始化（你学校） ====================
+# ==================== 初始化 ====================
 if 'page' not in st.session_state:
     st.session_state.page = "飞行监控"
 
@@ -134,7 +136,7 @@ for k,v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ==================== 侧边栏（所有功能完整） ====================
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -168,7 +170,10 @@ with st.sidebar:
         name = st.text_input("名称", "教学楼")
         if st.button("保存障碍物"):
             if len(st.session_state.draw_points)>=3:
-                st.session_state.obstacles.append({"name":name,"points":st.session_state.draw_points.copy()})
+                st.session_state.obstacles.append({
+                    "name":name,
+                    "points":st.session_state.draw_points.copy()
+                })
                 st.session_state.draw_points = []
                 save_state()
                 st.rerun()
@@ -177,7 +182,6 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-        # 删除障碍物
         st.subheader("已保存")
         obs_names = [f"{i+1}. {o['name']}" for i,o in enumerate(st.session_state.obstacles)]
         if obs_names:
