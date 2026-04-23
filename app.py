@@ -50,23 +50,14 @@ def compute_safe_path(start, end, obstacles):
         perp_dy = dx
         wp = (cx + perp_dx * safety, cy + perp_dy * safety)
         path.append(wp)
-        current = Point(wp)
+        = Point(wp)
 
     path.append((target.x, target.y))
     return path
 
-# ==================== 地图 ====================
+# ==================== 地图（修复所有错误） ====================
 def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_system, temp_points):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=19, tiles=None)
-
-    folium.TileLayer(
-        "https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
-        name="街道图"
-    ).add_to(m)
-    folium.TileLayer(
-        "https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}",
-        name="卫星图"
-    ).add_to(m)
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=19)
 
     # 起点
     if home_point:
@@ -98,7 +89,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
     for lng, lat in temp_points:
         folium.CircleMarker([lat, lng], radius=4, color="red").add_to(m)
 
-    folium.LayerControl().add_to(m)
     return m
 
 # ==================== 保存加载 ====================
