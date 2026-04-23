@@ -8,7 +8,6 @@ from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
-from shapely.ops import split
 
 st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
@@ -43,14 +42,12 @@ def find_safe_path(start, end, obstacles, shift=0.0002):
         if not hit_obs:
             break
 
-        # 从障碍物侧面绕开，不穿过去
         poly = Polygon(hit_obs["points"])
         cx, cy = poly.centroid.x, poly.centroid.y
 
         dx = target[0] - current[0]
         dy = target[1] - current[1]
 
-        # 垂直方向绕开
         px, py = -dy, dx
         length = (px**2 + py**2)**0.5
         px, py = px/length * shift, py/length * shift
@@ -58,9 +55,9 @@ def find_safe_path(start, end, obstacles, shift=0.0002):
         wp1 = (cx + px, cy + py)
         wp2 = (cx - px, cy - py)
 
-        # 选一个不碰障碍物的绕路点
-        safe1 = not any(Polygon(o["points"]).intersects(LineString([current, wp1]))) for o in obstacles)
-        safe2 = not any(Polygon(o["points"]).intersects(LineString([current, wp2]))) for o in obstacles)
+        # 修复括号语法错误
+        safe1 = not any(Polygon(o["points"]).intersects(LineString([current, wp1])) for o in obstacles)
+        safe2 = not any(Polygon(o["points"]).intersects(LineString([current, wp2])) for o in obstacles)
 
         if safe1:
             waypoint = wp1
@@ -85,7 +82,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
         attr='高德街道', name='街道图'
     ).add_to(m)
 
-    # 卫星图（真正影像）
+    # 卫星图
     folium.TileLayer(
         tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
         attr='高德卫星', name='卫星图(超清)'
@@ -104,7 +101,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
             ps.append([plat, plng])
         folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.4, popup=f"{ob['name']}").add_to(m)
 
-    # 避障航线（不穿过障碍物）
+    # 避障航线
     if len(waypoints) >= 2:
         start_wp = waypoints[0]
         end_wp = waypoints[-1]
@@ -119,7 +116,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
         folium.PolyLine(route, color='blue', weight=5).add_to(m)
         folium.Marker([route[-1][0], route[-1][1]], icon=folium.Icon(color='red', icon='flag'), popup="终点").add_to(m)
 
-    # 圈选预览
+    # 圈选
     for lng, lat in temp_points:
         folium.CircleMarker([lat, lng], radius=4, color='red', fill=True).add_to(m)
 
@@ -147,7 +144,7 @@ def load_state():
             return json.load(f)
     return {}
 
-# ==================== 初始化（你学校精确坐标） ====================
+# ==================== 初始化 ====================
 if 'page' not in st.session_state:
     st.session_state.page = "飞行监控"
 
@@ -170,7 +167,7 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ==================== 侧边栏（所有功能完整保留） ====================
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -225,7 +222,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-        # ========== 删除障碍物功能（完整保留） ==========
+        # 删除障碍物
         st.subheader("📋 已保存障碍物")
         obs_names = [f"{i+1}. {o['name']}" for i, o in enumerate(st.session_state.obstacles)]
         if obs_names:
@@ -284,7 +281,6 @@ else:
     )
     o = st_folium(m, width=1100, height=650, key="map")
 
-    # 圈选打点
     if o and o.get("last_clicked"):
         lat = o["last_clicked"]["lat"]
         lng = o["last_clicked"]["lng"]
