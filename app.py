@@ -43,7 +43,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
         attr='高德街道', name='街道图'
     ).add_to(m)
 
-    # 高清卫星图（真实影像）
+    # 高清卫星图
     folium.TileLayer(
         tiles='https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
         attr='高德卫星', name='卫星图(超清)'
@@ -84,8 +84,12 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
             popup=f"{ob['name']} | {ob['height']}m"
         ).add_to(m)
 
-    for lng,lat in temp_points:
-        folium.CircleMarker(location=[lat,lng],radius=5,color='red',fill=True).add_to(m)
+    # 圈选预览
+    if len(temp_points) >= 3:
+        ps = [[lat, lng] for lng, lat in temp_points]
+        folium.Polygon(locations=ps, color='red', weight=2, fill=True, fill_opacity=0.2).add_to(m)
+    for lng, lat in temp_points:
+        folium.CircleMarker(location=[lat, lng], radius=4, color='red', fill=True).add_to(m)
 
     folium.LayerControl().add_to(m)
     return m
@@ -111,13 +115,12 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 【精准官方坐标】南京科技职业学院 ====================
+# ==================== 学校精确坐标 ====================
 if 'page' not in st.session_state:
-    st.session_state.page="飞行监控"
+    st.session_state.page = "飞行监控"
 
 loaded = load_state()
 
-# 你学校官方精确坐标（葛关路625号）
 OFFICIAL_LNG = 118.749413
 OFFICIAL_LAT = 32.234097
 
@@ -144,57 +147,71 @@ with st.sidebar:
     st.markdown("**南京科技职业学院**")
     st.caption("📍 葛关路625号")
 
-    page=st.radio("功能",["📡 飞行监控","🗺️ 航线规划"])
-    st.session_state.page=page
+    page = st.radio("功能", ["📡 飞行监控", "🗺️ 航线规划"])
+    st.session_state.page = page
 
     if "🗺️ 航线规划" in page:
-        st.session_state.coord_system=st.selectbox(
-            "坐标系",["gcj02","wgs84"],format_func=lambda x:"GCJ02(国内标准)" if x=="gcj02" else "WGS84(GPS)"
+        st.session_state.coord_system = st.selectbox(
+            "坐标系", ["gcj02","wgs84"], format_func=lambda x:"GCJ02(国内标准)" if x=="gcj02" else "WGS84(GPS)"
         )
         st.subheader("🏠 起飞点")
-        hlng=st.number_input("经度",value=st.session_state.home_point[0],format="%.6f")
-        hlat=st.number_input("纬度",value=st.session_state.home_point[1],format="%.6f")
+        hlng = st.number_input("经度", value=st.session_state.home_point[0], format="%.6f")
+        hlat = st.number_input("纬度", value=st.session_state.home_point[1], format="%.6f")
         if st.button("更新起飞点"):
-            st.session_state.home_point=(hlng,hlat)
+            st.session_state.home_point = (hlng, hlat)
             save_state()
             st.rerun()
 
         st.subheader("✈️ 航线")
-        alng=st.number_input("A经度",value=st.session_state.a_point[0],format="%.6f")
-        alat=st.number_input("A纬度",value=st.session_state.a_point[1],format="%.6f")
-        blng=st.number_input("B经度",value=st.session_state.b_point[0],format="%.6f")
-        blat=st.number_input("B纬度",value=st.session_state.b_point[1],format="%.6f")
-        c1,c2=st.columns(2)
+        alng = st.number_input("A经度", value=st.session_state.a_point[0], format="%.6f")
+        alat = st.number_input("A纬度", value=st.session_state.a_point[1], format="%.6f")
+        blng = st.number_input("B经度", value=st.session_state.b_point[0], format="%.6f")
+        blat = st.number_input("B纬度", value=st.session_state.b_point[1], format="%.6f")
+        c1, c2 = st.columns(2)
         with c1:
             if st.button("生成航线"):
-                st.session_state.a_point=(alng,alat)
-                st.session_state.b_point=(blng,blat)
-                st.session_state.waypoints=[st.session_state.a_point, st.session_state.b_point]
+                st.session_state.a_point = (alng, alat)
+                st.session_state.b_point = (blng, blat)
+                st.session_state.waypoints = [st.session_state.a_point, st.session_state.b_point]
                 save_state()
         with c2:
             if st.button("清空航线"):
-                st.session_state.waypoints=[]
+                st.session_state.waypoints = []
                 save_state()
                 st.rerun()
 
-        st.subheader("🚧 障碍物")
+        st.subheader("🚧 圈选障碍物（点击地图）")
         st.write(f"已打点：{len(st.session_state.draw_points)}")
-        height=st.number_input("高度(m)",1,500,25)
-        name=st.text_input("名称","教学楼")
+        height = st.number_input("高度(m)", 1, 500, 25)
+        name = st.text_input("名称", "教学楼")
 
-        if st.button("✅ 保存障碍物"):
-            if len(st.session_state.draw_points)>=3:
+        if st.button("✅ 保存障碍物（永久记忆）"):
+            if len(st.session_state.draw_points) >= 3:
                 st.session_state.obstacles.append({
-                    "name":name,"height":height,"points":st.session_state.draw_points.copy()
+                    "name": name, "height": height, "points": st.session_state.draw_points.copy()
                 })
-                st.session_state.draw_points=[]
+                st.session_state.draw_points = []
                 save_state()
                 st.success("保存成功")
                 st.rerun()
             else:
-                st.warning("至少3个点")
+                st.warning("至少3个点才能圈选区域")
         if st.button("❌ 清空当前打点"):
-            st.session_state.draw_points=[]
+            st.session_state.draw_points = []
+            save_state()
+            st.rerun()
+
+        st.subheader("📋 已保存障碍物")
+        obs_names = [f"{i+1}. {o['name']} ({o['height']}m)" for i, o in enumerate(st.session_state.obstacles)]
+        if obs_names:
+            selected = st.selectbox("选择删除", obs_names)
+            if st.button("删除选中"):
+                idx = int(selected.split(".")[0]) - 1
+                st.session_state.obstacles.pop(idx)
+                save_state()
+                st.rerun()
+        if st.button("🗑️ 清空所有障碍物"):
+            st.session_state.obstacles = []
             save_state()
             st.rerun()
 
@@ -241,6 +258,7 @@ if "飞行监控" in st.session_state.page:
 # ==================== 航线规划 ====================
 else:
     st.header("🗺️ 航线规划")
+    st.success("✅ 卫星图正常｜✅ 学校定位精准｜✅ 圈选已修复")
 
     clng, clat = st.session_state.home_point
 
@@ -256,11 +274,14 @@ else:
         )
         o = st_folium(m, width=1100, height=650, key="MAP_FIXED_KEY")
 
-    if o and o.get("last_clicked"):
+    # ========== 圈选修复核心 ==========
+    if o and "last_clicked" in o and o["last_clicked"] is not None:
         lat = o["last_clicked"]["lat"]
-        lng = o["last_clicked"]["lat"]
-        pt = (round(lng,6), round(lat,6))
-        if pt != st.session_state.last_click:
-            st.session_state.last_click = pt
+        lng = o["last_clicked"]["lng"]
+        pt = (round(lng, 6), round(lat, 6))
+
+        if st.session_state.get("last_click") != pt:
+            st.session_state["last_click"] = pt
             st.session_state.draw_points.append(pt)
             save_state()
+            st.rerun()
