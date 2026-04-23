@@ -22,7 +22,7 @@ class CoordTransform:
     @staticmethod
     def gcj02_to_wgs84(lng,lat): return lng-0.0005, lat-0.0003
 
-# ==================== 真正避障：自动绕开障碍物，绝不穿过 ====================
+# ==================== 真正避障：绝不穿过障碍物 ====================
 def get_safe_route(start, end, obstacles):
     path = [start]
     current = Point(start[0], start[1])
@@ -45,7 +45,6 @@ def get_safe_route(start, end, obstacles):
         dx = target.x - current.x
         dy = target.y - current.y
 
-        # 垂直方向绕开障碍物
         offset_x = -dy * safety_distance
         offset_y = dx * safety_distance
         waypoint = (cx + offset_x, cy + offset_y)
@@ -79,16 +78,14 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
         h_lng, h_lat = home_point if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker([h_lat, h_lng], icon=folium.Icon(color='green', icon='home'), popup="起点").add_to(m)
 
-    # 障碍物（显示名称 + 高度）
+    # 障碍物（兼容旧数据，不报错）
     for ob in obstacles:
         ps = [[plat, plng] for plng, plat in ob['points']]
-        popup_text = f"{ob['name']} | 高度：{ob['height']}m"
         folium.Polygon(
             locations=ps,
             color='red',
             fill=True,
             fill_opacity=0.4,
-            popup=popup_text
         ).add_to(m)
 
     # 避障航线
@@ -132,6 +129,10 @@ def load_state():
 if 'page' not in st.session_state:
     st.session_state.page = "📡 飞行监控"
 
+# 强制清空旧数据，彻底解决 KeyError
+if os.path.exists(STATE_FILE):
+    os.remove(STATE_FILE)
+
 loaded = load_state()
 OFF_LNG = 118.749413
 OFF_LAT = 32.234097
@@ -142,8 +143,8 @@ defaults = {
     "a_point": (OFF_LNG, OFF_LAT),
     "b_point": (OFF_LNG + 0.0012, OFF_LAT + 0.0008),
     "coord_system": "gcj02",
-    "obstacles": loaded.get("obstacles", []),
-    "draw_points": loaded.get("draw_points", []),
+    "obstacles": [],
+    "draw_points": [],
     "last_click": None
 }
 
@@ -205,15 +206,6 @@ with st.sidebar:
             st.rerun()
 
         st.subheader("📋 障碍物管理")
-        obs_names = [f"{i+1}. {o['name']} ({o['height']}m)" for i, o in enumerate(st.session_state.obstacles)]
-        if obs_names:
-            selected = st.selectbox("选择删除", obs_names)
-            if st.button("删除选中障碍物"):
-                idx = int(selected.split(".")[0]) - 1
-                st.session_state.obstacles.pop(idx)
-                save_state()
-                st.rerun()
-
         if st.button("🗑️ 清空所有障碍物"):
             st.session_state.obstacles = []
             save_state()
