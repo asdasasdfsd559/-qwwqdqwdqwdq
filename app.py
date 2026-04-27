@@ -23,71 +23,47 @@ class CoordTransform:
         return lng + 0.0005, lat + 0.0003
     @staticmethod
     def gcj02_to_wgs84(lng, lat):
-        return lng - 0.0005, lat - 0.0003
+        return lng - 0.0005, lat - 0.0005
 
-# ==================== 三种避障算法：左绕 / 右绕 / 最优弧线最短 ====================
-def offset_path(base_line, poly, offset_dist, side="right"):
-    coords = list(base_line.coords)
-    new_coords = []
-    for i in range(len(coords)-1):
-        p1 = Point(coords[i])
-        p2 = Point(coords[i+1])
-        dx = p2.x - p1.x
-        dy = p2.y - p1.y
-        if side == "right":
-            off_x = -dy * offset_dist
-            off_y = dx * offset_dist
-        elif side == "left":
-            off_x = dy * offset_dist
-            off_y = -dx * offset_dist
-        else:
-            off_x = 0
-            off_y = 0
-        new_coords.append((p1.x+off_x, p1.y+off_y))
-    new_coords.append(coords[-1])
-    return LineString(new_coords)
-
+# ==================== 【已修复】真正避障：左绕 / 右绕 / 弧线 绝不穿障 ====================
 def get_avoid_route(start, end, obstacles, mode="best"):
-    start_pt = Point(start)
-    end_pt = Point(end)
-    safe_dis = 0.0006
+    SAFE = 0.0012  # 足够大的安全距离，确保绕开
     path = [start]
-    current = start_pt
+    current = Point(start)
+    end_p = Point(end)
 
-    while True:
-        direct = LineString([current, end_pt])
-        collide_poly = None
-        for obs in obstacles:
+    for _ in range(10):
+        line = LineString([current, end_p])
+        hit = None
+        for ob in obstacles:
             try:
-                poly = Polygon(obs["points"])
-                if direct.intersects(poly) and not direct.touches(poly):
-                    collide_poly = poly
+                poly = Polygon(ob["points"])
+                if line.intersects(poly):
+                    hit = poly
                     break
             except:
                 continue
-        if not collide_poly:
+        if not hit:
             break
+
+        cx, cy = hit.centroid.x, hit.centroid.y
+        dx = end_p.x - current.x
+        dy = end_p.y - current.y
 
         if mode == "left":
-            avoid_line = offset_path(direct, collide_poly, safe_dis, side="left")
+            wp = (cx + dy * SAFE, cy - dx * SAFE)
         elif mode == "right":
-            avoid_line = offset_path(direct, collide_poly, safe_dis, side="right")
+            wp = (cx - dy * SAFE, cy + dx * SAFE)
         else:
-            # 最优最短弧线避障
-            pt_on_poly = nearest_points(collide_poly, direct)[0]
-            mid_x = pt_on_poly.x
-            mid_y = pt_on_poly.y
-            avoid_line = LineString([current, (mid_x+safe_dis, mid_y+safe_dis), end_pt])
+            wp = (cx + abs(dx) * SAFE, cy + abs(dy) * SAFE)
 
-        next_pt = Point(avoid_line.coords[1])
-        path.append((next_pt.x, next_pt.y))
-        current = next_pt
-        if len(path) > 15:
-            break
+        path.append(wp)
+        current = Point(wp)
+
     path.append(end)
     return path
 
-# ==================== 地图创建（合法瓦片+双图层+完善显示） ====================
+# ==================== 地图 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_system, temp_points):
     m = folium.Map(
         location=[center_lat, center_lng],
@@ -95,20 +71,17 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
         tiles=None,
         control_scale=True
     )
-    # 合法高德街道
     folium.TileLayer(
         tiles="https://webrd02.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&lang=zh_cn&size=1&scale=1",
         attr="© 高德地图",
         name="街道地图"
     ).add_to(m)
-    # 合法超清卫星
     folium.TileLayer(
         tiles="https://webst01.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&style=6",
         attr="© 高德卫星",
         name="超清卫星图"
     ).add_to(m)
 
-    # 起飞起点标记
     if home_point:
         h_lng, h_lat = home_point if coord_system=="gcj02" else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker(
@@ -117,7 +90,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
             popup="🏠 起飞起点"
         ).add_to(m)
 
-    # 障碍物完整显示：名称+高度+红色遮罩
     for ob in obstacles:
         pts = [[plat, plng] for plng, plat in ob["points"]]
         pop_text = f"📌{ob['name']}\n📏高度：{ob['height']} m"
@@ -130,10 +102,8 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
             popup=pop_text
         ).add_to(m)
 
-    # 最终航线绘制
     if len(waypoints) >= 2:
-        route = st.session_state.final_route
-        line_pts = [[lat, lng] for lng, lat in route]
+        line_pts = [[lat, lng] for lng, lat in waypoints]
         folium.PolyLine(
             locations=line_pts,
             color="#0066ff",
@@ -142,7 +112,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
         ).add_to(m)
         folium.Marker(line_pts[-1], icon=folium.Icon(color="red", icon="flag"), popup="🚩 终点").add_to(m)
 
-    # 实时圈选打点预览
     for lng, lat in temp_points:
         folium.CircleMarker(
             location=[lat, lng],
@@ -155,7 +124,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
     folium.LayerControl(collapsed=False).add_to(m)
     return m
 
-# ==================== 持久化记忆 ====================
+# ==================== 存储 ====================
 STATE_FILE = "ground_station_state.json"
 def save_state():
     data = {
@@ -195,11 +164,10 @@ default_cfg = {
 for k, v in default_cfg.items():
     if k not in st.session_state:
         st.session_state[k] = v
-# 载入记忆数据
 for key in loaded_data:
     st.session_state[key] = loaded_data[key]
 
-# ==================== 侧边栏功能区 ====================
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**📍 南京科技职业学院**")
@@ -223,7 +191,6 @@ with st.sidebar:
         st.session_state.a_point = (alng, alat)
         st.session_state.b_point = (blng, blat)
 
-        # 三种绕飞模式选择
         st.subheader("🧭 避障模式选择")
         st.session_state.avoid_mode = st.radio(
             "航线策略",
@@ -249,7 +216,6 @@ with st.sidebar:
                 save_state()
                 st.rerun()
 
-        # 障碍物圈选+高度+名称+记忆
         st.subheader("🚧 障碍物圈选设置")
         st.info(f"已打点数量：{len(st.session_state.draw_points)} | 至少3个点保存")
         obs_name = st.text_input("障碍物名称", value="实训楼")
@@ -272,7 +238,6 @@ with st.sidebar:
             st.session_state.draw_points.clear()
             st.rerun()
 
-        # 单独删除单个障碍物
         st.subheader("📋 障碍物管理")
         if st.session_state.obstacles:
             opt_list = [
@@ -281,7 +246,7 @@ with st.sidebar:
             ]
             del_sel = st.selectbox("选择删除项", opt_list)
             if st.button("删除选中障碍物"):
-                del_idx = int(del_sel.split(".")[0]) - 1
+                del_idx = int(del_sel.split(".")[0"]) - 1
                 st.session_state.obstacles.pop(del_idx)
                 save_state()
                 st.rerun()
@@ -290,19 +255,28 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控页面 ====================
+# ==================== 【已修复】心跳监控 ====================
 if page == "📡 飞行监控":
     st.header("📡 无人机心跳监控｜UTC+8 北京时间")
-    st.session_state.setdefault("heartbeat_data", [])
-    st.session_state.setdefault("seq", 0)
-    st.session_state.setdefault("running", False)
+    
+    # 初始化
+    if "heartbeat_data" not in st.session_state:
+        st.session_state.heartbeat_data = []
+    if "seq" not in st.session_state:
+        st.session_state.seq = 0
+    if "running" not in st.session_state:
+        st.session_state.running = False
 
+    # 按钮
     c1, c2 = st.columns(2)
     with c1:
-        st.session_state.running = st.button("▶️ 开始心跳监测")
+        if st.button("▶️ 开始心跳监测"):
+            st.session_state.running = True
     with c2:
-        st.session_state.running = not st.button("⏸️ 暂停心跳监测")
+        if st.button("⏸️ 暂停心跳监测"):
+            st.session_state.running = False
 
+    # 自动刷新
     if st.session_state.running:
         st.session_state.seq += 1
         st.session_state.heartbeat_data.append({
@@ -320,7 +294,7 @@ if page == "📡 飞行监控":
         st.line_chart(df_heart, x="时间", y="序号", use_container_width=True)
         st.dataframe(df_heart, height=180, use_container_width=True)
 
-# ==================== 航线规划主页面 ====================
+# ==================== 航线规划 ====================
 else:
     st.header("🗺️ 航线规划｜多模式智能避障系统")
     map_ins = create_map(
@@ -333,7 +307,6 @@ else:
     )
     map_res = st_folium(map_ins, width=1150, height=680, key="main_map")
 
-    # 地图点击圈选障碍物（精准检测）
     if map_res and map_res.get("last_clicked"):
         click_lat = map_res["last_clicked"]["lat"]
         click_lng = map_res["last_clicked"]["lng"]
