@@ -62,16 +62,16 @@ def get_safe_route(start, end, obstacles, mode):
             path.append((x, y))
         return path
 
-# ==================== 【修复】高德地图瓦片 ====================
+# ==================== 【仅更新街道图为2026最新】高德瓦片 ====================
 def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=18, tiles=None)
 
-    # 合法高德街道地图瓦片
+    # 2026最新高德街道图（style=8 最新路网+校名标注）
     folium.TileLayer(
-        tiles="https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}",
-        attr="© 高德地图", name="街道地图"
+        tiles="https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
+        attr="© 高德地图 2026", name="街道地图"
     ).add_to(m)
-    # 高德卫星地图瓦片
+    # 高德卫星地图瓦片（不变）
     folium.TileLayer(
         tiles="https://webst02.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&style=6",
         attr="© 高德卫星", name="超清卫星图"
@@ -111,6 +111,9 @@ if "initialized" not in st.session_state:
     st.session_state.last_click = None
     st.session_state.route = []
     st.session_state.avoid_mode = "arc"
+    st.session_state.running = False
+    st.session_state.heartbeat_data = []
+    st.session_state.seq = 0
     st.session_state.initialized = True
 
 # ==================== 侧边栏 ====================
@@ -232,4 +235,4 @@ else:
         if st.session_state.last_click != point:
             st.session_state.last_click = point
             st.session_state.draw_points.append(point)
-            st.rerun() 
+            st.rerun()
