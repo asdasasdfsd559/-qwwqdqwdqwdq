@@ -25,28 +25,28 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0005
 
-# ==================== 【已修复】真正避障：左绕 / 右绕 / 弧线 绝不穿障 ====================
+# ==================== 避障算法：左绕 / 右绕 / 最优弧线 ====================
 def get_avoid_route(start, end, obstacles, mode="best"):
-    SAFE = 0.0012  # 足够大的安全距离，确保绕开
+    SAFE = 0.0015
     path = [start]
     current = Point(start)
     end_p = Point(end)
 
     for _ in range(10):
         line = LineString([current, end_p])
-        hit = None
+        hit_poly = None
         for ob in obstacles:
             try:
                 poly = Polygon(ob["points"])
                 if line.intersects(poly):
-                    hit = poly
+                    hit_poly = poly
                     break
             except:
                 continue
-        if not hit:
+        if not hit_poly:
             break
 
-        cx, cy = hit.centroid.x, hit.centroid.y
+        cx, cy = hit_poly.centroid.x, hit_poly.centroid.y
         dx = end_p.x - current.x
         dy = end_p.y - current.y
 
@@ -55,7 +55,7 @@ def get_avoid_route(start, end, obstacles, mode="best"):
         elif mode == "right":
             wp = (cx - dy * SAFE, cy + dx * SAFE)
         else:
-            wp = (cx + abs(dx) * SAFE, cy + abs(dy) * SAFE)
+            wp = (cx + SAFE, cy + SAFE)
 
         path.append(wp)
         current = Point(wp)
@@ -63,7 +63,7 @@ def get_avoid_route(start, end, obstacles, mode="best"):
     path.append(end)
     return path
 
-# ==================== 地图 ====================
+# ==================== 地图创建 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_system, temp_points):
     m = folium.Map(
         location=[center_lat, center_lng],
@@ -124,7 +124,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, obstacles, coord_s
     folium.LayerControl(collapsed=False).add_to(m)
     return m
 
-# ==================== 存储 ====================
+# ==================== 持久化存储 ====================
 STATE_FILE = "ground_station_state.json"
 def save_state():
     data = {
@@ -246,7 +246,7 @@ with st.sidebar:
             ]
             del_sel = st.selectbox("选择删除项", opt_list)
             if st.button("删除选中障碍物"):
-                del_idx = int(del_sel.split(".")[0"]) - 1
+                del_idx = int(del_sel.split(".")[0]) - 1
                 st.session_state.obstacles.pop(del_idx)
                 save_state()
                 st.rerun()
@@ -255,11 +255,10 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 【已修复】心跳监控 ====================
+# ==================== 飞行监控（已修复） ====================
 if page == "📡 飞行监控":
     st.header("📡 无人机心跳监控｜UTC+8 北京时间")
     
-    # 初始化
     if "heartbeat_data" not in st.session_state:
         st.session_state.heartbeat_data = []
     if "seq" not in st.session_state:
@@ -267,7 +266,6 @@ if page == "📡 飞行监控":
     if "running" not in st.session_state:
         st.session_state.running = False
 
-    # 按钮
     c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ 开始心跳监测"):
@@ -276,7 +274,6 @@ if page == "📡 飞行监控":
         if st.button("⏸️ 暂停心跳监测"):
             st.session_state.running = False
 
-    # 自动刷新
     if st.session_state.running:
         st.session_state.seq += 1
         st.session_state.heartbeat_data.append({
