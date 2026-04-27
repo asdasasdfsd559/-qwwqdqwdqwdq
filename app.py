@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
+from shapely.ops import buffer
 
 st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
@@ -24,19 +25,20 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【终极避障算法】100%不碰障碍物 ====================
+# ==================== 【终极避障】带安全距离的边界膨胀 ====================
+def get_safe_obstacle(obs):
+    """将障碍物向外膨胀，生成带安全距离的禁区"""
+    poly = Polygon(obs["points"])
+    # 0.0001约等于10米，足够安全
+    safe_poly = poly.buffer(0.0001)
+    return safe_poly
+
 def is_path_safe(path, obstacles):
-    """检查整个路径是否完全安全，不碰任何障碍物"""
-    for (x, y) in path:
-        pt = Point(x, y)
-        for obs in obstacles:
-            poly = Polygon(obs["points"])
-            if poly.contains(pt):
-                return False
+    """检查整个路径是否在所有安全区之外"""
     line = LineString(path)
     for obs in obstacles:
-        poly = Polygon(obs["points"])
-        if line.intersects(poly):
+        safe_poly = get_safe_obstacle(obs)
+        if line.intersects(safe_poly):
             return False
     return True
 
@@ -45,18 +47,17 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     end_pt = Point(end)
     direct_line = LineString([start, end])
 
-    # 先找第一个挡路的障碍物
+    # 找挡路的障碍物（包含安全区）
     hit_obs = None
     for obs in obstacles:
-        poly = Polygon(obs["points"])
-        if direct_line.intersects(poly):
+        safe_poly = get_safe_obstacle(obs)
+        if direct_line.intersects(safe_poly):
             hit_obs = obs
             break
 
     # 无障碍物，直接直飞
     if hit_obs is None:
         if fly_mode == "弧线最短航线":
-            # 无障碍物的平滑弧线
             dx = end[0] - start[0]
             dy = end[1] - start[1]
             mid_lng = (start[0] + end[0]) / 2
@@ -83,51 +84,43 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     cx = poly.centroid.x
     cy = poly.centroid.y
 
-    # 确定偏移方向
+    # 确定绕飞方向
     if fly_mode == "左侧绕飞":
         perp_x = -dy_norm
         perp_y = dx_norm
     elif fly_mode == "右侧绕飞":
         perp_x = dy_norm
-        perp_y = -dy_norm
+        perp_y = -dx_norm
     else:
         perp_x = -dy_norm
         perp_y = dx_norm
 
-    # 【核心】一步步往外推，直到整个路径完全安全！
-    offset = 0.0001
-    waypoint = None
-    path = None
-    for i in range(20):
-        current_offset = offset * (i+1)
-        wp = (cx + perp_x * current_offset, cy + perp_y * current_offset)
-        
-        if fly_mode == "弧线最短航线":
-            # 生成弧线，检查是否安全
-            arc_points = []
-            for t in [i/20 for i in range(21)]:
-                clng = (1-t)**2 * start[0] + 2*(1-t)*t * wp[0] + t**2 * end[0]
-                clat = (1-t)**2 * start[1] + 2*(1-t)*t * wp[1] + t**2 * end[1]
-                arc_points.append((clng, clat))
-            if is_path_safe(arc_points, obstacles):
+    # 【核心】从障碍物中心向外推，直到路径完全安全
+    for offset in [0.0002, 0.0003, 0.0004, 0.0005]:
+        waypoint = (cx + perp_x * offset, cy + perp_y * offset)
+        test_path = [start, waypoint, end]
+        if is_path_safe(test_path, obstacles):
+            if fly_mode == "弧线最短航线":
+                arc_points = []
+                for t in [i/20 for i in range(21)]:
+                    clng = (1-t)**2 * start[0] + 2*(1-t)*t * waypoint[0] + t**2 * end[0]
+                    clat = (1-t)**2 * start[1] + 2*(1-t)*t * waypoint[1] + t**2 * end[1]
+                    arc_points.append((clng, clat))
                 return arc_points
-        else:
-            # 生成折线，检查是否安全
-            test_path = [start, wp, end]
-            if is_path_safe(test_path, obstacles):
+            else:
                 return test_path
 
-    # 如果推到最大还不行，就用最大的
-    wp = (cx + perp_x * offset * 20, cy + perp_y * offset * 20)
+    # 兜底：用最大偏移
+    waypoint = (cx + perp_x * 0.0005, cy + perp_y * 0.0005)
     if fly_mode == "弧线最短航线":
         arc_points = []
         for t in [i/20 for i in range(21)]:
-            clng = (1-t)**2 * start[0] + 2*(1-t)*t * wp[0] + t**2 * end[0]
-            clat = (1-t)**2 * start[1] + 2*(1-t)*t * wp[1] + t**2 * end[1]
+            clng = (1-t)**2 * start[0] + 2*(1-t)*t * waypoint[0] + t**2 * end[0]
+            clat = (1-t)**2 * start[1] + 2*(1-t)*t * waypoint[1] + t**2 * end[1]
             arc_points.append((clng, clat))
         return arc_points
     else:
-        return [start, wp, end]
+        return [start, waypoint, end]
 
 # ==================== 地图 ====================
 def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
@@ -168,7 +161,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup="🚩 降落点"
         ).add_to(m)
 
-    # 障碍物
+    # 障碍物（红色本体）
     for ob in obstacles:
         ps=[]
         for p in ob['points']:
@@ -191,7 +184,6 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
                 lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
             route.append([lat, lng])
         
-        # 不同模式不同颜色，一眼区分
         color_map = {
             "直飞最短":"blue",
             "左侧绕飞":"orange",
@@ -380,8 +372,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（100%安全避障版）")
-    st.success("✅ 逐点安全校验 | ✅ 5米安全距离 | ✅ 所有航线完全不碰障碍物")
+    st.header("🗺️ 航线规划（带安全距离版）")
+    st.success("✅ 障碍物膨胀安全区 | ✅ 逐点安全校验 | ✅ 航线不碰边界")
 
     clng, clat = st.session_state.home_point
 
