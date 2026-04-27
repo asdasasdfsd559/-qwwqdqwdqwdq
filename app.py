@@ -61,7 +61,7 @@ def get_safe_route(start, end, obstacles, mode):
             path.append((x, y))
         return path
 
-# ==================== 地图（你确认的2026最新街道图，完全不变） ====================
+# ==================== 地图（2026最新街道图，完全不变） ====================
 def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=18, tiles=None)
 
@@ -96,7 +96,7 @@ def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points
     folium.LayerControl().add_to(m)
     return m
 
-# ==================== 初始化（完全不变） ====================
+# ==================== 初始化（修复变量缺失） ====================
 if "initialized" not in st.session_state:
     st.session_state.clear()
     OFF_LNG = 118.749413
@@ -110,7 +110,7 @@ if "initialized" not in st.session_state:
     st.session_state.route = []
     st.session_state.avoid_mode = "arc"
     
-    # 心跳初始化
+    # 心跳初始化（全部定义，防止报错）
     st.session_state.running = False
     st.session_state.heartbeat_data = []
     st.session_state.seq = 0
@@ -181,7 +181,7 @@ with st.sidebar:
                 st.session_state.obstacles.pop(idx)
                 st.rerun()
 
-# ==================== ✅ ✅ ✅ 【你要的：完美心跳自发自收 + 超时判断】修复完成 ✅ ✅ ✅ ====================
+# ==================== 【无报错版】心跳自发自收 + 3秒超时 ====================
 if page == "📡 飞行监控":
     st.header("📡 无人机心跳监控｜UTC+8")
 
@@ -193,10 +193,9 @@ if page == "📡 飞行监控":
         if st.button("⏸️ 暂停心跳模拟"):
             st.session_state.running = False
 
-    # 自动每秒发包（自发自收）
+    # 自动每秒发包
     if st.session_state.running:
         now = time.time()
-        # 每秒发一次
         if now - st.session_state.last_packet_time >= 1.0:
             st.session_state.seq += 1
             st.session_state.heartbeat_data.append({
@@ -210,16 +209,16 @@ if page == "📡 飞行监控":
         time.sleep(0.1)
         st.rerun()
 
-    # 超时判断（3秒未收到 → 报警）
+    # 超时判断（安全判断）
     current_time = time.time()
     time_diff = current_time - st.session_state.last_packet_time
 
     if time_diff > 3:
         st.error(f"⚠️ 心跳超时！{int(time_diff)}秒未收到数据包！")
     else:
-        st.success(f"✅ 心跳正常，最后接收：{round(time_diff,1)}秒前")
+        st.success(f"✅ 心跳正常 | 最后接收：{round(time_diff,1)}秒前")
 
-    # 可视化 + 列表
+    # 可视化
     df = pd.DataFrame(st.session_state.heartbeat_data)
     if not df.empty:
         st.subheader("心跳实时曲线")
@@ -242,7 +241,7 @@ else:
     if map_output and map_output.get("last_clicked"):
         lat = map_output["last_clicked"]["lat"]
         lng = map_output["last_clicked"]["lng"]
-        point = (round(lng, 6), round(lat))
+        point = (round(lng, 6), round(lat, 6))
         if st.session_state.last_click != point:
             st.session_state.last_click = point
             st.session_state.draw_points.append(point)
