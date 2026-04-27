@@ -7,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
-from shapely.ops import buffer
 
 st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
@@ -25,21 +24,29 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【终极避障】带安全距离的边界膨胀 ====================
+# ==================== 【终极避障】修复shapely导入错误 + 安全距离 ====================
 def get_safe_obstacle(obs):
-    """将障碍物向外膨胀，生成带安全距离的禁区"""
+    """将障碍物向外膨胀，生成带安全距离的禁区（修复buffer调用方式）"""
     poly = Polygon(obs["points"])
-    # 0.0001约等于10米，足够安全
+    # 0.0001约等于10米安全距离，buffer是几何对象的方法，不是导入的函数
     safe_poly = poly.buffer(0.0001)
     return safe_poly
 
 def is_path_safe(path, obstacles):
     """检查整个路径是否在所有安全区之外"""
+    if len(path) < 2:
+        return True
     line = LineString(path)
     for obs in obstacles:
-        safe_poly = get_safe_obstacle(obs)
-        if line.intersects(safe_poly):
-            return False
+        try:
+            safe_poly = get_safe_obstacle(obs)
+            if line.intersects(safe_poly):
+                return False
+        except:
+            # 兼容异常情况，确保程序不崩溃
+            poly = Polygon(obs["points"])
+            if line.intersects(poly):
+                return False
     return True
 
 def plan_safe_path(start, end, obstacles, fly_mode):
@@ -50,10 +57,16 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     # 找挡路的障碍物（包含安全区）
     hit_obs = None
     for obs in obstacles:
-        safe_poly = get_safe_obstacle(obs)
-        if direct_line.intersects(safe_poly):
-            hit_obs = obs
-            break
+        try:
+            safe_poly = get_safe_obstacle(obs)
+            if direct_line.intersects(safe_poly):
+                hit_obs = obs
+                break
+        except:
+            poly = Polygon(obs["points"])
+            if direct_line.intersects(poly):
+                hit_obs = obs
+                break
 
     # 无障碍物，直接直飞
     if hit_obs is None:
@@ -75,7 +88,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     # 计算飞行方向向量
     dx = end[0] - start[0]
     dy = end[1] - start[1]
-    length = (dx**2 + dy**2)**0.5
+    length = (dx**2 + dy**2)**0.5 if dx**2 + dy**2 > 0 else 1
     dx_norm = dx / length
     dy_norm = dy / length
 
@@ -373,7 +386,7 @@ if "飞行监控" in st.session_state.page:
 # ==================== 航线规划 ====================
 else:
     st.header("🗺️ 航线规划（带安全距离版）")
-    st.success("✅ 障碍物膨胀安全区 | ✅ 逐点安全校验 | ✅ 航线不碰边界")
+    st.success("✅ 修复导入错误 | ✅ 障碍物膨胀安全区 | ✅ 航线不碰边界")
 
     clng, clat = st.session_state.home_point
 
