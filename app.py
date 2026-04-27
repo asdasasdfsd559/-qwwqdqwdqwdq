@@ -24,13 +24,7 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【边界级避障】绝对不穿障 ====================
-def get_obstacle_bounds(obs):
-    """获取障碍物的边界，确保绕飞点在外面"""
-    xs = [p[0] for p in obs["points"]]
-    ys = [p[1] for p in obs["points"]]
-    return min(xs), max(xs), min(ys), max(ys)
-
+# ==================== 【飞行方向相对避障】这才是你要的左/右绕飞 ====================
 def plan_safe_path(start, end, obstacles, fly_mode):
     start_pt = Point(start)
     end_pt = Point(end)
@@ -48,25 +42,44 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     if hit_obs is None:
         return [start, end]
 
-    # 有障碍物，用边界计算绕飞点，绝对不碰
-    min_x, max_x, min_y, max_y = get_obstacle_bounds(hit_obs)
-    # 绕飞点必须在障碍物外面，留足够距离
-    offset = 0.0003
+    # 计算飞行方向向量
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    # 归一化
+    length = (dx**2 + dy**2)**0.5
+    dx_norm = dx / length
+    dy_norm = dy / length
+
+    # 障碍物中心
+    poly = Polygon(hit_obs["points"])
+    cx = poly.centroid.x
+    cy = poly.centroid.y
+
+    # 绕飞距离，足够大，一眼看出区别
+    offset = 0.0005
 
     if fly_mode == "左侧绕飞":
-        # 左绕飞：点在障碍物的最左边的左边
-        waypoint = (min_x - offset, (min_y + max_y) / 2)
+        # 飞行方向的左侧：垂直向量 (-dy, dx)
+        perp_x = -dy_norm
+        perp_y = dx_norm
+        # 绕飞点：障碍物中心 + 左侧偏移
+        waypoint = (cx + perp_x * offset, cy + perp_y * offset)
         return [start, waypoint, end]
 
     elif fly_mode == "右侧绕飞":
-        # 右绕飞：点在障碍物的最右边的右边
-        waypoint = (max_x + offset, (min_y + max_y) / 2)
+        # 飞行方向的右侧：垂直向量 (dy, -dx)
+        perp_x = dy_norm
+        perp_y = -dy_norm
+        # 绕飞点：障碍物中心 + 右侧偏移
+        waypoint = (cx + perp_x * offset, cy + perp_y * offset)
         return [start, waypoint, end]
 
     elif fly_mode == "弧线最短航线":
-        # 弧线：用左边界外的点做控制点，生成平滑弧线，绝对不穿
-        ctrl_x = min_x - offset
-        ctrl_y = (min_y + max_y) / 2
+        # 弧线：用左侧偏移点做控制点，平滑弧线
+        perp_x = -dy_norm
+        perp_y = dx_norm
+        ctrl_x = cx + perp_x * offset
+        ctrl_y = cy + perp_y * offset
         arc_points = []
         for t in [i/20 for i in range(21)]:
             clng = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
@@ -76,7 +89,9 @@ def plan_safe_path(start, end, obstacles, fly_mode):
 
     else:
         # 直飞最短：默认左绕
-        waypoint = (min_x - offset, (min_y + max_y) / 2)
+        perp_x = -dy_norm
+        perp_y = dx_norm
+        waypoint = (cx + perp_x * offset, cy + perp_y * offset)
         return [start, waypoint, end]
 
 # ==================== 地图 ====================
@@ -330,8 +345,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（边界避障版）")
-    st.success("✅ 左绕飞（左边界外）| ✅ 右绕飞（右边界外）| ✅ 避障弧线")
+    st.header("🗺️ 航线规划（飞行方向避障版）")
+    st.success("✅ 左绕飞（你飞行的左手边）| ✅ 右绕飞（你飞行的右手边）| ✅ 避障弧线")
 
     clng, clat = st.session_state.home_point
 
