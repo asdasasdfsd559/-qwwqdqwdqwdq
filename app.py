@@ -1,9 +1,7 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
 import time
 import json
-import math
 import os
 from datetime import datetime, timezone, timedelta
 import folium
@@ -14,12 +12,8 @@ st.set_page_config(page_title="南京科技职业学院无人机地面站", layo
 
 # ==================== 北京时间 ====================
 BEIJING_TZ = timezone(timedelta(hours=8))
-def get_beijing_time():
-    return datetime.now(BEIJING_TZ)
 def get_beijing_time_str():
-    return get_beijing_time().strftime("%H:%M:%S")
-def get_beijing_time_ms():
-    return get_beijing_time().strftime("%H:%M:%S.%f")[:-3]
+    return datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
 
 # ==================== 坐标转换 ====================
 class CoordTransform:
@@ -30,72 +24,57 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 航线算法：直飞 / 左绕飞 / 右绕飞 / 弧线最短 ====================
-def get_arc_curve_points(start, end, offset_ratio=0.25):
-    """生成弧形最短航线"""
-    lng1, lat1 = start
-    lng2, lat2 = end
-    # 中点
-    mid_lng = (lng1 + lng2) / 2
-    mid_lat = (lat1 + lat2) / 2
-    # 垂直偏移
-    dx = lng2 - lng1
-    dy = lat2 - lat1
-    perp_lng = -dy * offset_ratio
-    perp_lat = dx * offset_ratio
-    # 弧顶控制点
-    ctrl_lng = mid_lng + perp_lng
-    ctrl_lat = mid_lat + perp_lat
-
-    pts = []
-    for t in [i/20 for i in range(21)]:
-        # 二次贝塞尔曲线
-        clng = (1-t)**2 * lng1 + 2*(1-t)*t * ctrl_lng + t**2 * lng2
-        clat = (1-t)**2 * lat1 + 2*(1-t)*t * ctrl_lat + t**2 * lat2
-        pts.append((clng, clat))
-    return pts
-
+# ==================== 【修复版】避障航线算法 ====================
 def plan_safe_path(start, end, obstacles, fly_mode="直飞最短"):
-    if fly_mode == "弧线最短航线":
-        return get_arc_curve_points(start, end)
+    start_pt = Point(start)
+    end_pt = Point(end)
+    direct_line = LineString([start, end])
 
-    safe_points = [start]
-    current = start
-    remaining_obstacles = obstacles.copy()
-    step = 0.00018
-
-    for _ in range(5):
-        line = LineString([current, end])
-        hit = None
-        for obs in remaining_obstacles:
-            poly = Polygon(obs["points"])
-            if line.intersects(poly):
-                hit = obs
-                break
-        if not hit:
+    # 先判断直飞是否穿障
+    hit_obstacle = None
+    for obs in obstacles:
+        poly = Polygon(obs["points"])
+        if direct_line.intersects(poly):
+            hit_obstacle = obs
             break
 
-        poly = Polygon(hit["points"])
-        cx = poly.centroid.x
-        cy = poly.centroid.y
-        dx = end[0] - current[0]
-        dy = end[1] - current[1]
-        perp_dx = -dy
-        perp_dy = dx
-
-        if fly_mode == "左侧绕飞":
-            waypoint = (cx + perp_dx * step, cy + perp_dy * step)
-        elif fly_mode == "右侧绕飞":
-            waypoint = (cx - perp_dx * step, cy - perp_dy * step)
+    # 无障碍物时，直接直飞
+    if hit_obstacle is None:
+        if fly_mode == "弧线最短航线":
+            # 无障时，弧线也走直线路径，保持最短
+            return [start, end]
         else:
-            waypoint = (cx + perp_dx * step, cy + perp_dy * step)
+            return [start, end]
 
-        safe_points.append(waypoint)
-        current = waypoint
-        remaining_obstacles = [o for o in remaining_obstacles if o != hit]
+    # 有障碍物，执行对应模式避障
+    poly = Polygon(hit_obstacle["points"])
+    cx, cy = poly.centroid.x, poly.centroid.y
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    perp_dx = -dy
+    perp_dy = dx
+    step = 0.0003  # 增大步距，让绕飞效果更明显
 
-    safe_points.append(end)
-    return safe_points
+    if fly_mode == "左侧绕飞":
+        waypoint = (cx + perp_dx * step, cy + perp_dy * step)
+        return [start, waypoint, end]
+    elif fly_mode == "右侧绕飞":
+        waypoint = (cx - perp_dx * step, cy - perp_dy * step)
+        return [start, waypoint, end]
+    elif fly_mode == "弧线最短航线":
+        # 先计算避障控制点，再生成贝塞尔弧线
+        ctrl_lng = cx + perp_dx * step
+        ctrl_lat = cy + perp_dy * step
+        arc_points = []
+        for t in [i/20 for i in range(21)]:
+            clng = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_lng + t**2 * end[0]
+            clat = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl_lat + t**2 * end[1]
+            arc_points.append((clng, clat))
+        return arc_points
+    else:
+        # 默认直飞最短，先避障再直飞
+        waypoint = (cx + perp_dx * step, cy + perp_dy * step)
+        return [start, waypoint, end]
 
 # ==================== 地图 ====================
 def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
@@ -118,7 +97,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
         attr='高德-卫星图', name='卫星图(超清)'
     ).add_to(m)
 
-    # 起飞点 无圆圈
+    # 起飞点
     if home_point:
         h_lng,h_lat=home_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker(
@@ -127,7 +106,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup="🏠 起飞点"
         ).add_to(m)
 
-    # 降落点 无圆圈
+    # 降落点
     if land_point:
         l_lng,l_lat=land_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker(
@@ -147,7 +126,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup=f"{ob['name']} | {ob['height']}m"
         ).add_to(m)
 
-    # 多模式航线绘制
+    # 航线绘制
     if len(waypoints) >= 2:
         start_pt = waypoints[0]
         end_pt = waypoints[-1]
@@ -159,7 +138,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
                 lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
             route.append([lat, lng])
         
-        # 不同航线不同颜色
+        # 不同模式用不同颜色，便于区分
         color_map = {
             "直飞最短":"blue",
             "左侧绕飞":"orange",
@@ -260,7 +239,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-        # ========== 新增：四种航线模式选择 ==========
+        # 航线模式
         st.subheader("🛫 航线模式")
         st.session_state.fly_mode = st.selectbox(
             "飞行策略",
@@ -312,7 +291,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控（完全原版不动） ====================
+# ==================== 飞行监控 ====================
 if "飞行监控" in st.session_state.page:
     st.header("📡 飞行监控")
 
@@ -352,8 +331,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（多模式航线+弧线最短）")
-    st.success("✅ 直飞 | ✅ 左绕飞 | ✅ 右绕飞 | ✅ 弧线最短航线")
+    st.header("🗺️ 航线规划（多模式+避障修复版）")
+    st.success("✅ 直飞 | ✅ 左绕飞 | ✅ 右绕飞 | ✅ 避障弧线最短")
 
     clng, clat = st.session_state.home_point
 
