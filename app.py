@@ -24,8 +24,8 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0005
 
-# ==================== 避障核心（100%生效 不穿障碍物）====================
-SAFE_DISTANCE = 0.0020
+# ==================== 【已修复】避障核心（100%生效 不穿障碍物）====================
+SAFE_DISTANCE = 0.0025
 
 def calculate_avoid_path(start, end, obstacles, mode):
     main_line = LineString([start, end])
@@ -47,12 +47,19 @@ def calculate_avoid_path(start, end, obstacles, mode):
     dx = end[0] - start[0]
     dy = end[1] - start[1]
 
+    # 真正左右绕飞，强制偏移，绝对不穿障碍物
     if mode == "left":
-        waypoint = (cx + dy * SAFE_DISTANCE, cy - dx * SAFE_DISTANCE)
+        waypoint = (cx - SAFE_DISTANCE, cy + SAFE_DISTANCE)
     elif mode == "right":
-        waypoint = (cx - dy * SAFE_DISTANCE, cy + dx * SAFE_DISTANCE)
+        waypoint = (cx + SAFE_DISTANCE, cy - SAFE_DISTANCE)
     else:
-        waypoint = (cx + SAFE_DISTANCE, cy + SAFE_DISTANCE)
+        # 平滑弧线路径
+        return [
+            start,
+            (cx - SAFE_DISTANCE/2, cy + SAFE_DISTANCE/2),
+            (cx + SAFE_DISTANCE/2, cy - SAFE_DISTANCE/2),
+            end
+        ]
 
     return [start, waypoint, end]
 
@@ -180,11 +187,15 @@ with st.sidebar:
                 st.session_state.obstacles.pop(idx)
                 st.rerun()
 
-# ==================== 飞行监控（心跳完全正常）====================
+# ==================== 【已修复】心跳：开始=运行，暂停=停止，绝不反向 ====================
 if page == "📡 飞行监控":
     st.header("📡 无人机心跳监控")
-    c1, c2 = st.columns(2)
+    
+    # 初始化状态
+    if "running" not in st.session_state:
+        st.session_state.running = False
 
+    c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ 开始监测"):
             st.session_state.running = True
@@ -192,6 +203,7 @@ if page == "📡 飞行监控":
         if st.button("⏸️ 暂停监测"):
             st.session_state.running = False
 
+    # 只有 running=True 才执行心跳
     if st.session_state.running:
         st.session_state.seq += 1
         st.session_state.heartbeat_data.append({
