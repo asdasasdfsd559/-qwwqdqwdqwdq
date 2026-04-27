@@ -77,7 +77,7 @@ def plan_safe_path(start, end, obstacles):
     safe_points.append(end)
     return safe_points
 
-# ==================== 地图【新增：降落点绘制】 ====================
+# ==================== 地图（移除所有圆点圈） ====================
 def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
     m=folium.Map(
         location=[center_lat,center_lng],
@@ -98,7 +98,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
         attr='高德-卫星图', name='卫星图(超清)'
     ).add_to(m)
 
-    # ========== 起飞点（原版保留不变） ==========
+    # 起飞点（仅图标，无圆圈）
     if home_point:
         h_lng,h_lat=home_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker(
@@ -106,9 +106,8 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             icon=folium.Icon(color='green', icon='home'),
             popup="🏠 起飞点"
         ).add_to(m)
-        folium.Circle(radius=40, location=[h_lat,h_lng], color='green', fill=True, fill_opacity=0.4).add_to(m)
 
-    # ========== 新增：降落点 独立显示 ==========
+    # 降落点（仅图标，无圆圈）
     if land_point:
         l_lng,l_lat=land_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker(
@@ -116,7 +115,6 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             icon=folium.Icon(color='red', icon='flag'),
             popup="🚩 降落点"
         ).add_to(m)
-        folium.Circle(radius=40, location=[l_lat,l_lng], color='red', fill=True, fill_opacity=0.4).add_to(m)
 
     # 障碍物
     for ob in obstacles:
@@ -129,7 +127,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup=f"{ob['name']} | {ob['height']}m"
         ).add_to(m)
 
-    # 自动避障航线：起飞点 → 降落点
+    # 自动避障航线
     safe_path = []
     if len(waypoints) >= 2:
         start_pt = waypoints[0]
@@ -154,7 +152,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
     folium.LayerControl().add_to(m)
     return m
 
-# ==================== 保存/加载（新增降落点存储） ====================
+# ==================== 保存/加载 ====================
 STATE_FILE = "ground_station_state.json"
 def save_state():
     state = {
@@ -176,7 +174,7 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 初始化（新增降落点默认坐标） ====================
+# ==================== 初始化 ====================
 if 'page' not in st.session_state:
     st.session_state.page="飞行监控"
 
@@ -203,7 +201,7 @@ for k, v in defaults.items():
     elif k not in st.session_state:
         st.session_state[k] = v
 
-# ==================== 侧边栏：新增【降落点】设置区 ====================
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -225,7 +223,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-        # 新增：降落点独立设置
+        # 降落点
         st.subheader("🚩 降落点")
         llng=st.number_input("降落经度",value=st.session_state.land_point[0],format="%.6f")
         llat=st.number_input("降落纬度",value=st.session_state.land_point[1],format="%.6f")
@@ -279,7 +277,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控（完全原版不动） ====================
+# ==================== 飞行监控（完全未改动） ====================
 if "飞行监控" in st.session_state.page:
     st.header("📡 飞行监控")
 
@@ -317,10 +315,10 @@ if "飞行监控" in st.session_state.page:
         time.sleep(1)
         st.rerun()
 
-# ==================== 航线规划（传入降落点） ====================
+# ==================== 航线规划 ====================
 else:
     st.header("🗺️ 航线规划（自动避障）")
-    st.success("✅ 卫星图｜✅ 起飞/降落双点｜✅ 圈选｜✅ 自动避障")
+    st.success("✅ 卫星图｜✅ 起飞/降落点位｜✅ 圈选｜✅ 自动避障")
 
     clng, clat = st.session_state.home_point
 
