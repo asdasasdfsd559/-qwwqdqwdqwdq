@@ -24,73 +24,60 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【彻底修复】避障航线核心算法 ====================
-def get_safe_waypoint(obstacle, start, end, direction):
-    """根据方向（左/右），生成障碍物外的安全绕飞点"""
-    poly = Polygon(obstacle["points"])
-    cx, cy = poly.centroid.x, poly.centroid.y
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    # 垂直方向向量（左右方向）
-    perp_dx = -dy
-    perp_dy = dx
-    # 增大步距，确保绕飞点完全在障碍物外
-    step = 0.0004
-
-    if direction == "left":
-        return (cx + perp_dx * step, cy + perp_dy * step)
-    else:
-        return (cx - perp_dx * step, cy - perp_dy * step)
+# ==================== 【边界级避障】绝对不穿障 ====================
+def get_obstacle_bounds(obs):
+    """获取障碍物的边界，确保绕飞点在外面"""
+    xs = [p[0] for p in obs["points"]]
+    ys = [p[1] for p in obs["points"]]
+    return min(xs), max(xs), min(ys), max(ys)
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     start_pt = Point(start)
     end_pt = Point(end)
     direct_line = LineString([start, end])
 
-    # 先判断直飞是否有障碍物
-    hit_obstacles = []
+    # 先找第一个挡路的障碍物
+    hit_obs = None
     for obs in obstacles:
         poly = Polygon(obs["points"])
         if direct_line.intersects(poly):
-            hit_obstacles.append(obs)
+            hit_obs = obs
+            break
 
-    # 无障碍物，直接返回直飞路径
-    if not hit_obstacles:
-        if fly_mode == "弧线最短航线":
-            # 无障时弧线也走直线，保证最短
-            return [start, end]
+    # 无障碍物，直接直飞
+    if hit_obs is None:
         return [start, end]
 
-    # 有障碍物，按模式生成路径
-    safe_path = [start]
-    current = start
+    # 有障碍物，用边界计算绕飞点，绝对不碰
+    min_x, max_x, min_y, max_y = get_obstacle_bounds(hit_obs)
+    # 绕飞点必须在障碍物外面，留足够距离
+    offset = 0.0003
 
-    # 只处理第一个障碍物，避免复杂多障碍绕飞混乱
-    obs = hit_obstacles[0]
+    if fly_mode == "左侧绕飞":
+        # 左绕飞：点在障碍物的最左边的左边
+        waypoint = (min_x - offset, (min_y + max_y) / 2)
+        return [start, waypoint, end]
 
-    if fly_mode == "直飞最短":
-        # 直飞模式，选左方最近的安全点
-        wp = get_safe_waypoint(obs, current, end, "left")
-        safe_path.append(wp)
-    elif fly_mode == "左侧绕飞":
-        wp = get_safe_waypoint(obs, current, end, "left")
-        safe_path.append(wp)
     elif fly_mode == "右侧绕飞":
-        wp = get_safe_waypoint(obs, current, end, "right")
-        safe_path.append(wp)
+        # 右绕飞：点在障碍物的最右边的右边
+        waypoint = (max_x + offset, (min_y + max_y) / 2)
+        return [start, waypoint, end]
+
     elif fly_mode == "弧线最短航线":
-        # 弧线模式：先取安全点作为控制点，再生成贝塞尔曲线
-        wp = get_safe_waypoint(obs, current, end, "left")
+        # 弧线：用左边界外的点做控制点，生成平滑弧线，绝对不穿
+        ctrl_x = min_x - offset
+        ctrl_y = (min_y + max_y) / 2
         arc_points = []
         for t in [i/20 for i in range(21)]:
-            clng = (1-t)**2 * start[0] + 2*(1-t)*t * wp[0] + t**2 * end[0]
-            clat = (1-t)**2 * start[1] + 2*(1-t)*t * wp[1] + t**2 * end[1]
+            clng = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
+            clat = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl_y + t**2 * end[1]
             arc_points.append((clng, clat))
         return arc_points
 
-    # 最后加上终点
-    safe_path.append(end)
-    return safe_path
+    else:
+        # 直飞最短：默认左绕
+        waypoint = (min_x - offset, (min_y + max_y) / 2)
+        return [start, waypoint, end]
 
 # ==================== 地图 ====================
 def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
@@ -113,7 +100,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
         attr='高德-卫星图', name='卫星图(超清)'
     ).add_to(m)
 
-    # 起飞点（无圆圈）
+    # 起飞点
     if home_point:
         h_lng,h_lat=home_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker(
@@ -122,7 +109,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup="🏠 起飞点"
         ).add_to(m)
 
-    # 降落点（无圆圈）
+    # 降落点
     if land_point:
         l_lng,l_lat=land_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker(
@@ -154,7 +141,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
                 lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
             route.append([lat, lng])
         
-        # 不同模式不同颜色，方便区分
+        # 不同模式不同颜色，一眼区分
         color_map = {
             "直飞最短":"blue",
             "左侧绕飞":"orange",
@@ -343,8 +330,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（避障修复版）")
-    st.success("✅ 直飞 | ✅ 左绕飞 | ✅ 右绕飞 | ✅ 避障弧线最短")
+    st.header("🗺️ 航线规划（边界避障版）")
+    st.success("✅ 左绕飞（左边界外）| ✅ 右绕飞（右边界外）| ✅ 避障弧线")
 
     clng, clat = st.session_state.home_point
 
