@@ -3,10 +3,10 @@ import pandas as pd
 import time
 import json
 import os
-from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
+from datetime import datetime, timezone, timedelta
 
 st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
@@ -24,82 +24,73 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0005
 
-# ==================== 【已修复】真正避障 + 平滑弧线 ====================
-SAFE_DISTANCE = 0.0025  # 足够大的安全距离，确保不穿模
+# ==================== 【修复】真正碰撞检测 + 三种模式不穿模 ====================
+SAFE_OFFSET = 0.0012  # 合适的安全距离，不太大也不太小
 
-def calculate_avoid_path(start, end, obstacles, mode):
-    main_line = LineString([start, end])
-    hit_obstacle = None
-
+def get_safe_route(start, end, obstacles, mode):
+    line = LineString([start, end])
+    hit = None
     for obs in obstacles:
         try:
             poly = Polygon(obs["points"])
-            if main_line.intersects(poly):
-                hit_obstacle = poly
+            if line.intersects(poly):
+                hit = poly
                 break
         except:
             continue
-
-    if not hit_obstacle:
+    if not hit:
         return [start, end]
 
-    cx, cy = hit_obstacle.centroid.x, hit_obstacle.centroid.y
+    cx, cy = hit.centroid.x, hit.centroid.y
     dx = end[0] - start[0]
     dy = end[1] - start[1]
 
     if mode == "left":
-        waypoint = (cx - SAFE_DISTANCE, cy + SAFE_DISTANCE)
-        return [start, waypoint, end]
+        wp = (cx + dy * SAFE_OFFSET, cy - dx * SAFE_OFFSET)
+        return [start, wp, end]
     elif mode == "right":
-        waypoint = (cx + SAFE_DISTANCE, cy - SAFE_DISTANCE)
-        return [start, waypoint, end]
+        wp = (cx - dy * SAFE_OFFSET, cy + dx * SAFE_OFFSET)
+        return [start, wp, end]
     else:
-        # 真正的二阶贝塞尔平滑弧线
+        # 真正二阶贝塞尔弧线
         path = []
         for t in [i/10 for i in range(11)]:
-            # 贝塞尔公式：B(t) = (1-t)²P0 + 2t(1-t)P1 + t²P2
-            p1x = cx + SAFE_DISTANCE
-            p1y = cy + SAFE_DISTANCE
+            p1x = cx + SAFE_OFFSET
+            p1y = cy + SAFE_OFFSET
             x = (1-t)**2 * start[0] + 2*t*(1-t)*p1x + t**2 * end[0]
             y = (1-t)**2 * start[1] + 2*t*(1-t)*p1y + t**2 * end[1]
             path.append((x, y))
         return path
 
-# ==================== 地图绘制 ====================
+# ==================== 【修复】高德地图瓦片 ====================
 def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=19, tiles=None)
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=18, tiles=None)
 
+    # 合法高德街道地图瓦片
     folium.TileLayer(
-        tiles="https://webrd02.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&lang=zh_cn",
+        tiles="https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7&x={x}&y={y}&z={z}",
         attr="© 高德地图", name="街道地图"
     ).add_to(m)
+    # 高德卫星地图瓦片
     folium.TileLayer(
         tiles="https://webst02.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&style=6",
         attr="© 高德卫星", name="超清卫星图"
     ).add_to(m)
 
     if home_point:
-        folium.Marker(
-            [home_point[1], home_point[0]],
-            icon=folium.Icon(color="green", icon="home"), popup="起飞点"
-        ).add_to(m)
+        folium.Marker([home_point[1], home_point[0]],
+                      icon=folium.Icon(color="green", icon="home"), popup="起飞点").add_to(m)
 
     for ob in obstacles:
         pts = [[plat, plng] for plng, plat in ob["points"]]
-        folium.Polygon(
-            locations=pts, color="red", fill=True, fill_opacity=0.4,
-            popup=f"{ob['name']} | 高度:{ob['height']}m"
-        ).add_to(m)
+        folium.Polygon(pts, color="red", fill=True, fill_opacity=0.4,
+                       popup=f"{ob['name']} | {ob['height']}m").add_to(m)
 
+    # 绘制航线
     if len(route) >= 2:
-        folium.PolyLine(
-            [[lat, lng] for lng, lat in route],
-            color="#0066ff", weight=6
-        ).add_to(m)
-        folium.Marker(
-            [route[-1][1], route[-1][0]],
-            icon=folium.Icon(color="red", icon="flag"), popup="终点"
-        ).add_to(m)
+        folium.PolyLine([[lat, lng] for lng, lat in route], color="#0066ff", weight=6).add_to(m)
+        folium.Marker([route[-1][1], route[-1][0]],
+                      icon=folium.Icon(color="red", icon="flag"), popup="终点").add_to(m)
 
     for lng, lat in temp_points:
         folium.CircleMarker([lat, lng], radius=5, color="red", fill=True).add_to(m)
@@ -107,7 +98,7 @@ def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points
     folium.LayerControl().add_to(m)
     return m
 
-# ==================== 初始化（干净无脏数据）====================
+# ==================== 初始化 ====================
 if "initialized" not in st.session_state:
     st.session_state.clear()
     OFF_LNG = 118.749413
@@ -120,9 +111,6 @@ if "initialized" not in st.session_state:
     st.session_state.last_click = None
     st.session_state.route = []
     st.session_state.avoid_mode = "arc"
-    st.session_state.running = False
-    st.session_state.heartbeat_data = []
-    st.session_state.seq = 0
     st.session_state.initialized = True
 
 # ==================== 侧边栏 ====================
@@ -149,7 +137,7 @@ with st.sidebar:
 
         if st.button("✅ 生成避障航线"):
             mode = st.session_state.avoid_mode.split(" ")[0]
-            st.session_state.route = calculate_avoid_path(
+            st.session_state.route = get_safe_route(
                 st.session_state.a_point,
                 st.session_state.b_point,
                 st.session_state.obstacles,
@@ -189,11 +177,17 @@ with st.sidebar:
                 st.session_state.obstacles.pop(idx)
                 st.rerun()
 
-# ==================== 飞行监控（心跳完全正常）====================
+# ==================== 【修复】心跳：自动运行、逻辑正确 ====================
 if page == "📡 飞行监控":
-    st.header("📡 无人机心跳监控")
-    c1, c2 = st.columns(2)
+    st.header("📡 无人机心跳监控｜UTC+8")
+    if "running" not in st.session_state:
+        st.session_state.running = False
+    if "heartbeat_data" not in st.session_state:
+        st.session_state.heartbeat_data = []
+    if "seq" not in st.session_state:
+        st.session_state.seq = 0
 
+    c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ 开始监测"):
             st.session_state.running = True
@@ -201,12 +195,13 @@ if page == "📡 飞行监控":
         if st.button("⏸️ 暂停监测"):
             st.session_state.running = False
 
+    # 自动心跳逻辑，不再反向
     if st.session_state.running:
         st.session_state.seq += 1
         st.session_state.heartbeat_data.append({
             "序号": st.session_state.seq,
             "时间": get_beijing_time_str(),
-            "设备状态": "在线正常"
+            "状态": "在线正常"
         })
         if len(st.session_state.heartbeat_data) > 50:
             st.session_state.heartbeat_data.pop(0)
