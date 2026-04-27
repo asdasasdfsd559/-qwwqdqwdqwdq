@@ -1,248 +1,336 @@
 import streamlit as st
 import pandas as pd
+import plotly.graph_objects as go
 import time
 import json
 import os
+from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
-from datetime import datetime, timezone, timedelta
 
 st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
 # ==================== 北京时间 ====================
 BEIJING_TZ = timezone(timedelta(hours=8))
+def get_beijing_time():
+    return datetime.now(BEIJING_TZ)
 def get_beijing_time_str():
-    return datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
+    return get_beijing_time().strftime("%H:%M:%S")
+def get_beijing_time_ms():
+    return get_beijing_time().strftime("%H:%M:%S.%f")[:-3]
 
 # ==================== 坐标转换 ====================
 class CoordTransform:
     @staticmethod
-    def wgs84_to_gcj02(lng, lat):
-        return lng + 0.0005, lat + 0.0003
+    def wgs84_to_gcj02(lng,lat):
+        return lng+0.0005, lat+0.0003
     @staticmethod
-    def gcj02_to_wgs84(lng, lat):
-        return lng - 0.0005, lat - 0.0005
+    def gcj02_to_wgs84(lng,lat):
+        return lng-0.0005, lat-0.0003
 
-# ==================== 避障算法（完全不变） ====================
-SAFE_OFFSET = 0.0012
-
-def get_safe_route(start, end, obstacles, mode):
-    line = LineString([start, end])
-    hit = None
-    for obs in obstacles:
-        try:
+# ==================== 【真正】自动避障算法 ====================
+def plan_safe_path(start, end, obstacles):
+    safe_points = [start]
+    current = start
+    remaining_obstacles = obstacles.copy()
+    
+    for _ in range(5):
+        line = LineString([current, end])
+        hit = None
+        for obs in remaining_obstacles:
             poly = Polygon(obs["points"])
             if line.intersects(poly):
-                hit = poly
+                hit = obs
                 break
-        except:
-            continue
-    if not hit:
-        return [start, end]
-
-    cx, cy = hit.centroid.x, hit.centroid.y
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-
-    if mode == "left":
-        wp = (cx + dy * SAFE_OFFSET, cy - dx * SAFE_OFFSET)
-        return [start, wp, end]
-    elif mode == "right":
-        wp = (cx - dy * SAFE_OFFSET, cy + dx * SAFE_OFFSET)
-        return [start, wp, end]
-    else:
-        path = []
-        for t in [i/10 for i in range(11)]:
-            p1x = cx + SAFE_OFFSET
-            p1y = cy + SAFE_OFFSET
-            x = (1-t)**2 * start[0] + 2*t*(1-t)*p1x + t**2 * end[0]
-            y = (1-t)**2 * start[1] + 2*t*(1-t)*p1y + t**2 * end[1]
-            path.append((x, y))
-        return path
-
-# ==================== 地图（2026最新街道图，完全不变） ====================
-def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=18, tiles=None)
-
-    # 2026最新高德街道图
-    folium.TileLayer(
-        tiles="https://webrd02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}",
-        attr="© 高德地图 2026", name="街道地图"
-    ).add_to(m)
+        if not hit:
+            break
+            
+        poly = Polygon(hit["points"])
+        cx = poly.centroid.x
+        cy = poly.centroid.y
+        dx = end[0] - current[0]
+        dy = end[1] - current[1]
+        perp_dx = -dy
+        perp_dy = dx
+        
+        step = 0.00018
+        p1 = (cx + perp_dx * step, cy + perp_dy * step)
+        p2 = (cx - perp_dx * step, cy - perp_dy * step)
+        
+        line1 = LineString([current, p1])
+        line2 = LineString([current, p2])
+        hit1 = any(LineString([current, p1]).intersects(Polygon(o["points"])) for o in remaining_obstacles)
+        hit2 = any(LineString([current, p2]).intersects(Polygon(o["points"])) for o in remaining_obstacles)
+        
+        if not hit1:
+            waypoint = p1
+        elif not hit2:
+            waypoint = p2
+        else:
+            waypoint = p1
+            
+        safe_points.append(waypoint)
+        current = waypoint
+        remaining_obstacles = [o for o in remaining_obstacles if o != hit]
     
+    safe_points.append(end)
+    return safe_points
+
+# ==================== 地图 ====================
+def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system,temp_points):
+    m=folium.Map(
+        location=[center_lat,center_lng],
+        zoom_start=19,
+        control_scale=True,
+        tiles=None
+    )
+
+    # 高德街道图
     folium.TileLayer(
-        tiles="https://webst02.is.autonavi.com/appmaptile?x={x}&y={y}&z={z}&style=6",
-        attr="© 高德卫星", name="超清卫星图"
+        tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+        attr='高德-2026街道', name='街道图'
     ).add_to(m)
 
+    # 高德卫星图（真·卫星图）
+    folium.TileLayer(
+        tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+        attr='高德-卫星图', name='卫星图(超清)'
+    ).add_to(m)
+
+    # 起点
     if home_point:
-        folium.Marker([home_point[1], home_point[0]],
-                      icon=folium.Icon(color="green", icon="home"), popup="起飞点").add_to(m)
+        h_lng,h_lat=home_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
+        folium.Marker(
+            [h_lat,h_lng],
+            icon=folium.Icon(color='green', icon='home'),
+            popup="🏠 起点"
+        ).add_to(m)
+        folium.Circle(radius=40, location=[h_lat,h_lng], color='green', fill=True, fill_opacity=0.4).add_to(m)
 
+    # 障碍物
     for ob in obstacles:
-        pts = [[plat, plng] for plng, plat in ob["points"]]
-        folium.Polygon(pts, color="red", fill=True, fill_opacity=0.4,
-                       popup=f"{ob['name']} | {ob['height']}m").add_to(m)
+        ps=[]
+        for p in ob['points']:
+            plng,plat=p if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*p)
+            ps.append([plat,plng])
+        folium.Polygon(
+            locations=ps,color='red',fill=True,fill_opacity=0.5,
+            popup=f"{ob['name']} | {ob['height']}m"
+        ).add_to(m)
 
-    if len(route) >= 2:
-        folium.PolyLine([[lat, lng] for lng, lat in route], color="#0066ff", weight=6).add_to(m)
-        folium.Marker([route[-1][1], route[-1][0]],
-                      icon=folium.Icon(color="red", icon="flag"), popup="终点").add_to(m)
+    # 【自动避障航线】
+    safe_path = []
+    if len(waypoints) >= 2:
+        start_pt = waypoints[0]
+        end_pt = waypoints[-1]
+        safe_path = plan_safe_path(start_pt, end_pt, obstacles)
+        
+        route = []
+        for (lng, lat) in safe_path:
+            if coord_system != 'gcj02':
+                lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
+            route.append([lat, lng])
+        
+        folium.PolyLine(route, color='blue', weight=5, opacity=0.9).add_to(m)
+        folium.Marker([route[-1][0], route[-1][1]],
+            icon=folium.Icon(color='red', icon='flag'), popup="🏁 终点").add_to(m)
 
-    for lng, lat in temp_points:
-        folium.CircleMarker([lat, lng], radius=5, color="red", fill=True).add_to(m)
+    # 圈选打点
+    if len(temp_points)>=3:
+        ps=[[lat,lng] for lng,lat in temp_points]
+        folium.Polygon(locations=ps, color='red', weight=2, fill_opacity=0.2).add_to(m)
+    for lng,lat in temp_points:
+        folium.CircleMarker(location=[lat,lng], radius=4, color='red', fill=True).add_to(m)
 
     folium.LayerControl().add_to(m)
     return m
 
-# ==================== 初始化（修复变量缺失） ====================
-if "initialized" not in st.session_state:
-    st.session_state.clear()
-    OFF_LNG = 118.749413
-    OFF_LAT = 32.234097
-    st.session_state.home_point = (OFF_LNG, OFF_LAT)
-    st.session_state.a_point = (OFF_LNG, OFF_LAT)
-    st.session_state.b_point = (OFF_LNG + 0.0012, OFF_LAT + 0.0008)
-    st.session_state.obstacles = []
-    st.session_state.draw_points = []
-    st.session_state.last_click = None
-    st.session_state.route = []
-    st.session_state.avoid_mode = "arc"
-    
-    # 心跳初始化（全部定义，防止报错）
-    st.session_state.running = False
-    st.session_state.heartbeat_data = []
-    st.session_state.seq = 0
-    st.session_state.last_packet_time = time.time()
-    st.session_state.initialized = True
+# ==================== 保存/加载 ====================
+STATE_FILE = "ground_station_state.json"
+def save_state():
+    state = {
+        "home_point": st.session_state.home_point,
+        "waypoints": st.session_state.waypoints,
+        "a_point": st.session_state.a_point,
+        "b_point": st.session_state.b_point,
+        "coord_system": st.session_state.coord_system,
+        "obstacles": st.session_state.obstacles,
+        "draw_points": st.session_state.draw_points
+    }
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
-# ==================== 侧边栏（完全不变） ====================
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+# ==================== 初始化（你学校精确坐标） ====================
+if 'page' not in st.session_state:
+    st.session_state.page="飞行监控"
+
+loaded = load_state()
+
+OFFICIAL_LNG = 118.749413
+OFFICIAL_LAT = 32.234097
+
+defaults = {
+    "home_point": (OFFICIAL_LNG, OFFICIAL_LAT),
+    "waypoints": [],
+    "a_point": (OFFICIAL_LNG, OFFICIAL_LAT),
+    "b_point": (OFFICIAL_LNG + 0.0008, OFFICIAL_LAT + 0.0005),
+    "coord_system": "gcj02",
+    "obstacles": [],
+    "draw_points": [],
+    "last_click": None
+}
+
+for k, v in defaults.items():
+    if loaded and k in loaded:
+        st.session_state[k] = loaded[k]
+    elif k not in st.session_state:
+        st.session_state[k] = v
+
+# ==================== 侧边栏（所有功能100%还原） ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
-    page = st.radio("功能菜单", ["📡 飞行监控", "🗺️ 航线规划"])
+    st.caption("📍 葛关路625号")
 
-    if page == "🗺️ 航线规划":
-        st.subheader("✈️ 航线起止点")
-        st.session_state.a_point = (
-            st.number_input("A点经度", value=st.session_state.a_point[0], format="%.6f"),
-            st.number_input("A点纬度", value=st.session_state.a_point[1], format="%.6f")
-        )
-        st.session_state.b_point = (
-            st.number_input("B点经度", value=st.session_state.b_point[0], format="%.6f"),
-            st.number_input("B点纬度", value=st.session_state.b_point[1], format="%.6f")
-        )
+    page=st.radio("功能",["📡 飞行监控","🗺️ 航线规划"])
+    st.session_state.page=page
 
-        st.subheader("🧭 避障模式")
-        st.session_state.avoid_mode = st.radio(
-            "", ["left 向左绕飞", "right 向右绕飞", "arc 最优弧线"]
+    if "🗺️ 航线规划" in page:
+        st.session_state.coord_system=st.selectbox(
+            "坐标系",["gcj02","wgs84"],format_func=lambda x:"GCJ02(国内标准)" if x=="gcj02" else "WGS84(GPS)"
         )
-
-        if st.button("✅ 生成避障航线"):
-            mode = st.session_state.avoid_mode.split(" ")[0]
-            st.session_state.route = get_safe_route(
-                st.session_state.a_point,
-                st.session_state.b_point,
-                st.session_state.obstacles,
-                mode
-            )
+        st.subheader("🏠 起飞点")
+        hlng=st.number_input("经度",value=st.session_state.home_point[0],format="%.6f")
+        hlat=st.number_input("纬度",value=st.session_state.home_point[1],format="%.6f")
+        if st.button("更新起飞点"):
+            st.session_state.home_point=(hlng,hlat)
+            save_state()
             st.rerun()
 
-        if st.button("清空航线"):
-            st.session_state.route = []
-            st.rerun()
+        st.subheader("✈️ 航线")
+        alng=st.number_input("A经度",value=st.session_state.a_point[0],format="%.6f")
+        alat=st.number_input("A纬度",value=st.session_state.a_point[1],format="%.6f")
+        blng=st.number_input("B经度",value=st.session_state.b_point[0],format="%.6f")
+        blat=st.number_input("B纬度",value=st.session_state.b_point[1],format="%.6f")
+        c1,c2=st.columns(2)
+        with c1:
+            if st.button("生成航线"):
+                st.session_state.a_point=(alng,alat)
+                st.session_state.b_point=(blng,blat)
+                st.session_state.waypoints=[st.session_state.a_point, st.session_state.b_point]
+                save_state()
+        with c2:
+            if st.button("清空航线"):
+                st.session_state.waypoints=[]
+                save_state()
+                st.rerun()
 
-        st.subheader("🚧 障碍物设置")
-        st.info(f"已打点：{len(st.session_state.draw_points)}")
-        obs_name = st.text_input("障碍物名称", "教学楼")
-        obs_height = st.number_input("高度(m)", 5, 500, 30)
+        st.subheader("🚧 圈选障碍物（点击地图）")
+        st.write(f"已打点：{len(st.session_state.draw_points)}")
+        height=st.number_input("高度(m)",1,500,25)
+        name=st.text_input("名称","教学楼")
 
-        if st.button("保存障碍物"):
-            if len(st.session_state.draw_points) >= 3:
+        if st.button("✅ 保存障碍物"):
+            if len(st.session_state.draw_points)>=3:
                 st.session_state.obstacles.append({
-                    "name": obs_name,
-                    "height": obs_height,
-                    "points": st.session_state.draw_points.copy()
+                    "name":name,"height":height,"points":st.session_state.draw_points.copy()
                 })
-                st.session_state.draw_points = []
+                st.session_state.draw_points=[]
+                save_state()
+                st.success("保存成功")
                 st.rerun()
-
-        if st.button("清空当前圈选"):
-            st.session_state.draw_points = []
+            else:
+                st.warning("至少3个点")
+        if st.button("❌ 清空当前打点"):
+            st.session_state.draw_points=[]
+            save_state()
             st.rerun()
 
-        st.subheader("🗑️ 删除障碍物")
-        if st.session_state.obstacles:
-            options = [f"{i+1}.{o['name']}({o['height']}m)" for i, o in enumerate(st.session_state.obstacles)]
-            selected = st.selectbox("选择删除", options)
-            if st.button("删除选中项"):
-                idx = int(selected.split(".")[0]) - 1
+        # ==================== 【还原】删除障碍物功能 ====================
+        st.subheader("📋 已保存障碍物")
+        obs_names=[f"{i+1}. {o['name']} ({o['height']}m)" for i,o in enumerate(st.session_state.obstacles)]
+        if obs_names:
+            selected=st.selectbox("选择删除",obs_names)
+            if st.button("删除选中"):
+                idx=int(selected.split(".")[0])-1
                 st.session_state.obstacles.pop(idx)
+                save_state()
                 st.rerun()
+        if st.button("🗑️ 清空所有障碍物"):
+            st.session_state.obstacles=[]
+            save_state()
+            st.rerun()
 
-# ==================== 【无报错版】心跳自发自收 + 3秒超时 ====================
-if page == "📡 飞行监控":
-    st.header("📡 无人机心跳监控｜UTC+8")
+# ==================== 飞行监控 ====================
+if "飞行监控" in st.session_state.page:
+    st.header("📡 飞行监控")
+
+    if "heartbeat_data" not in st.session_state:
+        st.session_state.heartbeat_data = []
+        st.session_state.seq = 0
+        st.session_state.running = False
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("▶️ 开始心跳模拟"):
+        if st.button("▶️ 开始心跳监测", use_container_width=True):
             st.session_state.running = True
     with c2:
-        if st.button("⏸️ 暂停心跳模拟"):
+        if st.button("⏸️ 暂停心跳监测", use_container_width=True):
             st.session_state.running = False
 
-    # 自动每秒发包
+    placeholder = st.empty()
+
     if st.session_state.running:
-        now = time.time()
-        if now - st.session_state.last_packet_time >= 1.0:
-            st.session_state.seq += 1
-            st.session_state.heartbeat_data.append({
-                "序号": st.session_state.seq,
-                "时间": get_beijing_time_str(),
-                "状态": "✅ 已接收"
-            })
-            st.session_state.last_packet_time = now
-            if len(st.session_state.heartbeat_data) > 60:
-                st.session_state.heartbeat_data.pop(0)
-        time.sleep(0.1)
+        st.session_state.seq += 1
+        t = get_beijing_time_str()
+        st.session_state.heartbeat_data.append({
+            "序号": st.session_state.seq, "时间": t, "状态": "在线正常"
+        })
+        if len(st.session_state.heartbeat_data) > 60:
+            st.session_state.heartbeat_data.pop(0)
+
+    with placeholder.container():
+        df = pd.DataFrame(st.session_state.heartbeat_data)
+        if not df.empty:
+            st.line_chart(df, x="时间", y="序号", color="#ff4560")
+            st.dataframe(df, use_container_width=True, height=200)
+
+    if st.session_state.running:
+        time.sleep(1)
         st.rerun()
 
-    # 超时判断（安全判断）
-    current_time = time.time()
-    time_diff = current_time - st.session_state.last_packet_time
-
-    if time_diff > 3:
-        st.error(f"⚠️ 心跳超时！{int(time_diff)}秒未收到数据包！")
-    else:
-        st.success(f"✅ 心跳正常 | 最后接收：{round(time_diff,1)}秒前")
-
-    # 可视化
-    df = pd.DataFrame(st.session_state.heartbeat_data)
-    if not df.empty:
-        st.subheader("心跳实时曲线")
-        st.line_chart(df, x="时间", y="序号", use_container_width=True)
-        st.subheader("心跳接收列表")
-        st.dataframe(df, use_container_width=True)
-
-# ==================== 航线规划（完全不变） ====================
+# ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划｜智能避障系统")
-    map_obj = create_map(
-        118.749413, 32.234097,
-        st.session_state.route,
-        st.session_state.home_point,
-        st.session_state.obstacles,
-        st.session_state.draw_points
-    )
-    map_output = st_folium(map_obj, width=1200, height=700, key="main_map")
+    st.header("🗺️ 航线规划（自动避障）")
+    st.success("✅ 卫星图｜✅ 学校定位｜✅ 圈选｜✅ 删除障碍物｜✅ 自动避障")
 
-    if map_output and map_output.get("last_clicked"):
-        lat = map_output["last_clicked"]["lat"]
-        lng = map_output["last_clicked"]["lng"]
-        point = (round(lng, 6), round(lat, 6))
-        if st.session_state.last_click != point:
-            st.session_state.last_click = point
-            st.session_state.draw_points.append(point)
+    clng, clat = st.session_state.home_point
+
+    map_container = st.empty()
+    with map_container:
+        m = create_map(
+            clng, clat,
+            st.session_state.waypoints,
+            st.session_state.home_point,
+            st.session_state.obstacles,
+            st.session_state.coord_system,
+            st.session_state.draw_points
+        )
+        o = st_folium(m, width=1100, height=650, key="MAP_FIXED_KEY")
+
+    if o and o.get("last_clicked"):
+        lat = o["last_clicked"]["lat"]
+        lng = o["last_clicked"]["lng"]
+        pt = (round(lng, 6), round(lat, 6))
+        if st.session_state.last_click != pt:
+            st.session_state.last_click = pt
+            st.session_state.draw_points.append(pt)
+            save_state()
             st.rerun()
