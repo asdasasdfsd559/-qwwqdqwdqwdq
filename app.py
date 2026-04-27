@@ -136,6 +136,11 @@ def create_map(center_lng,center_lat,waypoints,home_point,obstacles,coord_system
         folium.Marker([route[-1][0], route[-1][1]],
             icon=folium.Icon(color='red', icon='flag'), popup="🏁 终点").add_to(m)
 
+        # ====================== 只加了这一段：终点圆圈 ======================
+        folium.Circle(radius=40, location=[route[-1][0], route[-1][1]], 
+                      color='red', fill=True, fill_opacity=0.4).add_to(m)
+        # ===================================================================
+
     # 圈选打点
     if len(temp_points)>=3:
         ps=[[lat,lng] for lng,lat in temp_points]
@@ -333,4 +338,4 @@ else:
             st.session_state.last_click = pt
             st.session_state.draw_points.append(pt)
             save_state()
-            st.rerun() 
+            st.rerun()
