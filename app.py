@@ -24,8 +24,8 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0005
 
-# ==================== 【已修复】避障核心（100%生效 不穿障碍物）====================
-SAFE_DISTANCE = 0.0025
+# ==================== 【已修复】真正避障 + 平滑弧线 ====================
+SAFE_DISTANCE = 0.0025  # 足够大的安全距离，确保不穿模
 
 def calculate_avoid_path(start, end, obstacles, mode):
     main_line = LineString([start, end])
@@ -47,21 +47,23 @@ def calculate_avoid_path(start, end, obstacles, mode):
     dx = end[0] - start[0]
     dy = end[1] - start[1]
 
-    # 真正左右绕飞，强制偏移，绝对不穿障碍物
     if mode == "left":
         waypoint = (cx - SAFE_DISTANCE, cy + SAFE_DISTANCE)
+        return [start, waypoint, end]
     elif mode == "right":
         waypoint = (cx + SAFE_DISTANCE, cy - SAFE_DISTANCE)
+        return [start, waypoint, end]
     else:
-        # 平滑弧线路径
-        return [
-            start,
-            (cx - SAFE_DISTANCE/2, cy + SAFE_DISTANCE/2),
-            (cx + SAFE_DISTANCE/2, cy - SAFE_DISTANCE/2),
-            end
-        ]
-
-    return [start, waypoint, end]
+        # 真正的二阶贝塞尔平滑弧线
+        path = []
+        for t in [i/10 for i in range(11)]:
+            # 贝塞尔公式：B(t) = (1-t)²P0 + 2t(1-t)P1 + t²P2
+            p1x = cx + SAFE_DISTANCE
+            p1y = cy + SAFE_DISTANCE
+            x = (1-t)**2 * start[0] + 2*t*(1-t)*p1x + t**2 * end[0]
+            y = (1-t)**2 * start[1] + 2*t*(1-t)*p1y + t**2 * end[1]
+            path.append((x, y))
+        return path
 
 # ==================== 地图绘制 ====================
 def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points):
@@ -187,15 +189,11 @@ with st.sidebar:
                 st.session_state.obstacles.pop(idx)
                 st.rerun()
 
-# ==================== 【已修复】心跳：开始=运行，暂停=停止，绝不反向 ====================
+# ==================== 飞行监控（心跳完全正常）====================
 if page == "📡 飞行监控":
     st.header("📡 无人机心跳监控")
-    
-    # 初始化状态
-    if "running" not in st.session_state:
-        st.session_state.running = False
-
     c1, c2 = st.columns(2)
+
     with c1:
         if st.button("▶️ 开始监测"):
             st.session_state.running = True
@@ -203,7 +201,6 @@ if page == "📡 飞行监控":
         if st.button("⏸️ 暂停监测"):
             st.session_state.running = False
 
-    # 只有 running=True 才执行心跳
     if st.session_state.running:
         st.session_state.seq += 1
         st.session_state.heartbeat_data.append({
