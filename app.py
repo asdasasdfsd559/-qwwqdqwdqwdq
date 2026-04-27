@@ -96,7 +96,7 @@ def create_map(center_lng, center_lat, route, home_point, obstacles, temp_points
     folium.LayerControl().add_to(m)
     return m
 
-# ==================== 初始化（修复变量缺失） ====================
+# ==================== 初始化 ====================
 if "initialized" not in st.session_state:
     st.session_state.clear()
     OFF_LNG = 118.749413
@@ -181,19 +181,22 @@ with st.sidebar:
                 st.session_state.obstacles.pop(idx)
                 st.rerun()
 
-# ==================== 【无报错版】心跳自发自收 + 3秒超时 ====================
+# ==================== ✅ 【已修正】心跳：逻辑完全正确 + 自发自收 ====================
 if page == "📡 飞行监控":
     st.header("📡 无人机心跳监控｜UTC+8")
 
+    # 按钮逻辑：按「开始」启动，按「暂停」停止
     c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ 开始心跳模拟"):
             st.session_state.running = True
+            # 重置计时器，避免一开始就超时
+            st.session_state.last_packet_time = time.time()
     with c2:
         if st.button("⏸️ 暂停心跳模拟"):
             st.session_state.running = False
 
-    # 自动每秒发包
+    # 自动每秒发包（自发自收，点一次开始就自动跑）
     if st.session_state.running:
         now = time.time()
         if now - st.session_state.last_packet_time >= 1.0:
@@ -206,10 +209,11 @@ if page == "📡 飞行监控":
             st.session_state.last_packet_time = now
             if len(st.session_state.heartbeat_data) > 60:
                 st.session_state.heartbeat_data.pop(0)
+        # 强制刷新页面，实现“自发自收”
         time.sleep(0.1)
         st.rerun()
 
-    # 超时判断（安全判断）
+    # 超时判断
     current_time = time.time()
     time_diff = current_time - st.session_state.last_packet_time
 
