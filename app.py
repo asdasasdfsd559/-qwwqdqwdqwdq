@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import time
 import json
+import math
 import os
 from datetime import datetime, timezone, timedelta
 import folium
@@ -29,12 +30,40 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【真正】自动避障算法 ====================
-def plan_safe_path(start, end, obstacles):
+# ==================== 航线算法：直飞 / 左绕飞 / 右绕飞 / 弧线最短 ====================
+def get_arc_curve_points(start, end, offset_ratio=0.25):
+    """生成弧形最短航线"""
+    lng1, lat1 = start
+    lng2, lat2 = end
+    # 中点
+    mid_lng = (lng1 + lng2) / 2
+    mid_lat = (lat1 + lat2) / 2
+    # 垂直偏移
+    dx = lng2 - lng1
+    dy = lat2 - lat1
+    perp_lng = -dy * offset_ratio
+    perp_lat = dx * offset_ratio
+    # 弧顶控制点
+    ctrl_lng = mid_lng + perp_lng
+    ctrl_lat = mid_lat + perp_lat
+
+    pts = []
+    for t in [i/20 for i in range(21)]:
+        # 二次贝塞尔曲线
+        clng = (1-t)**2 * lng1 + 2*(1-t)*t * ctrl_lng + t**2 * lng2
+        clat = (1-t)**2 * lat1 + 2*(1-t)*t * ctrl_lat + t**2 * lat2
+        pts.append((clng, clat))
+    return pts
+
+def plan_safe_path(start, end, obstacles, fly_mode="直飞最短"):
+    if fly_mode == "弧线最短航线":
+        return get_arc_curve_points(start, end)
+
     safe_points = [start]
     current = start
     remaining_obstacles = obstacles.copy()
-    
+    step = 0.00018
+
     for _ in range(5):
         line = LineString([current, end])
         hit = None
@@ -45,7 +74,7 @@ def plan_safe_path(start, end, obstacles):
                 break
         if not hit:
             break
-            
+
         poly = Polygon(hit["points"])
         cx = poly.centroid.x
         cy = poly.centroid.y
@@ -53,31 +82,22 @@ def plan_safe_path(start, end, obstacles):
         dy = end[1] - current[1]
         perp_dx = -dy
         perp_dy = dx
-        
-        step = 0.00018
-        p1 = (cx + perp_dx * step, cy + perp_dy * step)
-        p2 = (cx - perp_dx * step, cy - perp_dy * step)
-        
-        line1 = LineString([current, p1])
-        line2 = LineString([current, p2])
-        hit1 = any(LineString([current, p1]).intersects(Polygon(o["points"])) for o in remaining_obstacles)
-        hit2 = any(LineString([current, p2]).intersects(Polygon(o["points"])) for o in remaining_obstacles)
-        
-        if not hit1:
-            waypoint = p1
-        elif not hit2:
-            waypoint = p2
+
+        if fly_mode == "左侧绕飞":
+            waypoint = (cx + perp_dx * step, cy + perp_dy * step)
+        elif fly_mode == "右侧绕飞":
+            waypoint = (cx - perp_dx * step, cy - perp_dy * step)
         else:
-            waypoint = p1
-            
+            waypoint = (cx + perp_dx * step, cy + perp_dy * step)
+
         safe_points.append(waypoint)
         current = waypoint
         remaining_obstacles = [o for o in remaining_obstacles if o != hit]
-    
+
     safe_points.append(end)
     return safe_points
 
-# ==================== 地图（移除所有圆点圈） ====================
+# ==================== 地图 ====================
 def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
     m=folium.Map(
         location=[center_lat,center_lng],
@@ -92,13 +112,13 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
         attr='高德-2026街道', name='街道图'
     ).add_to(m)
 
-    # 高德卫星图（真·卫星图）
+    # 高德卫星图
     folium.TileLayer(
         tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
         attr='高德-卫星图', name='卫星图(超清)'
     ).add_to(m)
 
-    # 起飞点（仅图标，无圆圈）
+    # 起飞点 无圆圈
     if home_point:
         h_lng,h_lat=home_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker(
@@ -107,7 +127,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup="🏠 起飞点"
         ).add_to(m)
 
-    # 降落点（仅图标，无圆圈）
+    # 降落点 无圆圈
     if land_point:
         l_lng,l_lat=land_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker(
@@ -127,12 +147,11 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup=f"{ob['name']} | {ob['height']}m"
         ).add_to(m)
 
-    # 自动避障航线
-    safe_path = []
+    # 多模式航线绘制
     if len(waypoints) >= 2:
         start_pt = waypoints[0]
         end_pt = waypoints[-1]
-        safe_path = plan_safe_path(start_pt, end_pt, obstacles)
+        safe_path = plan_safe_path(start_pt, end_pt, obstacles, st.session_state.fly_mode)
         
         route = []
         for (lng, lat) in safe_path:
@@ -140,7 +159,15 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
                 lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
             route.append([lat, lng])
         
-        folium.PolyLine(route, color='blue', weight=5, opacity=0.9).add_to(m)
+        # 不同航线不同颜色
+        color_map = {
+            "直飞最短":"blue",
+            "左侧绕飞":"orange",
+            "右侧绕飞":"purple",
+            "弧线最短航线":"cyan"
+        }
+        line_color = color_map.get(st.session_state.fly_mode, "blue")
+        folium.PolyLine(route, color=line_color, weight=5, opacity=0.9).add_to(m)
 
     # 圈选打点
     if len(temp_points)>=3:
@@ -192,7 +219,8 @@ defaults = {
     "coord_system": "gcj02",
     "obstacles": [],
     "draw_points": [],
-    "last_click": None
+    "last_click": None,
+    "fly_mode": "直飞最短"
 }
 
 for k, v in defaults.items():
@@ -231,6 +259,13 @@ with st.sidebar:
             st.session_state.land_point=(llng,llat)
             save_state()
             st.rerun()
+
+        # ========== 新增：四种航线模式选择 ==========
+        st.subheader("🛫 航线模式")
+        st.session_state.fly_mode = st.selectbox(
+            "飞行策略",
+            ["直飞最短","左侧绕飞","右侧绕飞","弧线最短航线"]
+        )
 
         st.subheader("✈️ 航线生成")
         if st.button("生成起飞→降落航线"):
@@ -277,7 +312,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控（完全未改动） ====================
+# ==================== 飞行监控（完全原版不动） ====================
 if "飞行监控" in st.session_state.page:
     st.header("📡 飞行监控")
 
@@ -317,8 +352,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（自动避障）")
-    st.success("✅ 卫星图｜✅ 起飞/降落点位｜✅ 圈选｜✅ 自动避障")
+    st.header("🗺️ 航线规划（多模式航线+弧线最短）")
+    st.success("✅ 直飞 | ✅ 左绕飞 | ✅ 右绕飞 | ✅ 弧线最短航线")
 
     clng, clat = st.session_state.home_point
 
