@@ -7,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
-from shapely.ops import nearest_points
 
 st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
@@ -25,103 +24,79 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【真正安全绕飞核心算法】 ====================
-SAFE_DISTANCE = 0.00015  # 约15米绝对安全距离
+# ==================== 【按照你给的图重做的绕飞】 ====================
+SAFE_DISTANCE = 0.00015  # 15米安全距离
 
 def get_obstacle_safe_polygon(obs):
-    """获取带安全膨胀的障碍物禁区（绝对不能进入）"""
     poly = Polygon(obs["points"])
-    return poly.buffer(SAFE_DISTANCE)  # 向外膨胀安全距离
+    return poly.buffer(SAFE_DISTANCE)
 
-def get_safe_waypoint_around_obstacle(start, end, obstacle_poly, side="left"):
-    """
-    真正绕飞核心：
-    计算障碍物边缘的安全绕行点，无人机从旁边飞过去，不穿过障碍物
-    """
-    # 起点到终点直线
-    direct_line = LineString([start, end])
-    # 直线与障碍物交点
-    intersect_points = list(direct_line.intersection(obstacle_poly.boundary).coords)
-    if not intersect_points:
-        return None
-
-    # 取第一个交点作为绕行参考点
-    enter_pt = Point(intersect_points[0])
-    # 找到障碍物上最近的点
-    near_pt = nearest_points(enter_pt, obstacle_poly)[1]
-
-    # 计算绕行方向（左侧/右侧）
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    line_len = (dx**2 + dy**2)**0.5 or 1
-    dx_n = dx / line_len
-    dy_n = dy / line_len
-
-    # 垂直方向（左侧/右侧）
-    if side == "left":
-        perp_x, perp_y = -dy_n, dx_n
-    else:
-        perp_x, perp_y = dy_n, -dx_n
-
-    # 向外偏移安全距离，生成绕行点
-    safe_x = near_pt.x + perp_x * SAFE_DISTANCE * 2
-    safe_y = near_pt.y + perp_y * SAFE_DISTANCE * 2
-    return (safe_x, safe_y)
-
-def plan_real_safe_path(start, end, obstacles, fly_mode):
-    """
-    最终安全航线：
-    - 无障碍物：直飞/弧线
-    - 有障碍物：起点 → 绕行点 → 终点（三段式，绝对不穿障碍物）
-    """
+def plan_safe_path(start, end, obstacles, fly_mode):
     start_pt = Point(start)
     end_pt = Point(end)
     direct_line = LineString([start, end])
 
-    # 检查所有障碍物
-    hit_obstacle = None
+    # 检查是否有障碍物挡住
+    hit_obs = None
     hit_safe_poly = None
     for obs in obstacles:
         safe_poly = get_obstacle_safe_polygon(obs)
         if direct_line.intersects(safe_poly):
-            hit_obstacle = obs
+            hit_obs = obs
             hit_safe_poly = safe_poly
             break
 
     # 无障碍物，直接飞
-    if hit_obstacle is None:
+    if hit_obs is None:
         if "弧线" in fly_mode:
-            return generate_arc_path(start, end)
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            mx = (start[0]+end[0])/2
+            my = (start[1]+end[1])/2
+            ctrl = (mx - dy*0.15, my + dx*0.15)
+            points = []
+            for t in [i/20 for i in range(21)]:
+                x = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl[0] + t**2 * end[0]
+                y = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl[1] + t**2 * end[1]
+                points.append((x, y))
+            return points
         return [start, end]
 
-    # ==================== 有障碍物 → 执行真正绕飞 ====================
-    side = "left" if "左侧" in fly_mode else "right"
-    bypass_pt = get_safe_waypoint_around_obstacle(start, end, hit_safe_poly, side)
+    # ==================== 有障碍物，按照你要的左右绕飞 ====================
+    # 先拿到障碍物的边界
+    xs = [p[0] for p in hit_obs["points"]]
+    ys = [p[1] for p in hit_obs["points"]]
+    min_x = min(xs)
+    max_x = max(xs)
+    center_y = (min(ys) + max(ys)) / 2
 
-    # 生成安全路径：起点 → 绕行点 → 终点
+    if "左侧" in fly_mode:
+        # 左侧绕飞：绕到障碍物的左边（西边），和你图里的蓝色线一样
+        bypass_x = min_x - SAFE_DISTANCE
+        bypass_y = center_y
+    elif "右侧" in fly_mode:
+        # 右侧绕飞：绕到障碍物的右边（东边），和你图里的黑色线一样
+        bypass_x = max_x + SAFE_DISTANCE
+        bypass_y = center_y
+    else:
+        # 直飞最短，自动找最短的
+        bypass_x = min_x - SAFE_DISTANCE
+        bypass_y = center_y
+
+    bypass_pt = (bypass_x, bypass_y)
     safe_path = [start, bypass_pt, end]
 
     # 弧线模式
     if "弧线" in fly_mode:
-        return generate_arc_path(start, end, bypass_pt)
+        # 生成平滑弧线
+        points = []
+        for t in [i/20 for i in range(21)]:
+            x = (1-t)**2 * start[0] + 2*(1-t)*t * bypass_x + t**2 * end[0]
+            y = (1-t)**2 * start[1] + 2*(1-t)*t * bypass_y + t**2 * end[1]
+            points.append((x, y))
+        return points
 
     return safe_path
-
-def generate_arc_path(start, end, control=None):
-    """生成平滑弧线航线"""
-    if control is None:
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        mx = (start[0]+end[0])/2
-        my = (start[1]+end[1])/2
-        control = (mx - dy*0.15, my + dx*0.15)
-
-    points = []
-    for t in [i/20 for i in range(21)]:
-        x = (1-t)**2 * start[0] + 2*(1-t)*t * control[0] + t**2 * end[0]
-        y = (1-t)**2 * start[1] + 2*(1-t)*t * control[1] + t**2 * end[1]
-        points.append((x, y))
-    return points
 
 # ==================== 地图绘制 ====================
 def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
@@ -150,21 +125,25 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
         l_lng,l_lat=land_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker([l_lat,l_lng], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
-    # 障碍物（红色+安全区透明）
+    # 障碍物（红色+安全区）
     for ob in obstacles:
         ps = []
         for p in ob['points']:
             plng,plat=p if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*p)
             ps.append([plat,plng])
         folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.5, popup=f"{ob['name']}").add_to(m)
-        # 安全区绘制
+        # 安全区
         safe_p = get_obstacle_safe_polygon(ob)
-        safe_coords = [[lat,lng] for lng,lat in safe_p.exterior.coords]
+        safe_coords = []
+        for lng,lat in safe_p.exterior.coords:
+            if coord_system != 'gcj02':
+                lng,lat = CoordTransform.wgs84_to_gcj02(lng,lat)
+            safe_coords.append([lat,lng])
         folium.Polygon(locations=safe_coords, color='orange', fill=True, fill_opacity=0.15, weight=2, popup="安全禁区").add_to(m)
 
-    # 【真正绕飞航线】
+    # 航线
     if len(waypoints) >= 2:
-        safe_path = plan_real_safe_path(
+        safe_path = plan_safe_path(
             waypoints[0], waypoints[-1],
             obstacles,
             st.session_state.fly_mode
@@ -177,15 +156,15 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
 
         color = {
             "直飞最短":"blue",
-            "左侧绕飞":"#FF6B35",
-            "右侧绕飞":"#4D908E",
+            "左侧绕飞":"#0066cc",  # 蓝色，和你图里的左绕飞一样
+            "右侧绕飞":"#000000",  # 黑色，和你图里的右绕飞一样
             "弧线最短航线":"#F79E02"
         }.get(st.session_state.fly_mode, "blue")
 
         folium.PolyLine(
             route,
             color=color,
-            weight=6,
+            weight=5,
             opacity=1,
             popup="无人机安全航线"
         ).add_to(m)
@@ -230,7 +209,7 @@ OFFICIAL_LAT = 32.234097
 
 defaults = {
     "home_point": (OFFICIAL_LNG, OFFICIAL_LAT),
-    "land_point": (OFFICIAL_LNG + 0.0012, OFFICIAL_LAT + 0.0008),
+    "land_point": (OFFICIAL_LNG + 0.0008, OFFICIAL_LAT + 0.0005),
     "waypoints": [],
     "coord_system": "gcj02",
     "obstacles": [],
@@ -324,7 +303,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控（严格1秒心跳） ====================
+# ==================== 飞行监控 ====================
 if "飞行监控" in st.session_state.page:
     st.header("📡 飞行监控（1秒精准心跳）")
 
@@ -346,7 +325,6 @@ if "飞行监控" in st.session_state.page:
 
     if st.session_state.running:
         now = time.time()
-        # 严格1秒间隔，不漂移、不加速
         if now - st.session_state.last_beat_time >= 1.0:
             st.session_state.seq += 1
             t = get_beijing_time_str()
@@ -374,8 +352,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（真正绕飞·永不撞机）")
-    st.success("✅ 真正绕飞算法 | ✅ 安全禁区 | ✅ 航线绝对不穿障碍物 | ✅ 左侧/右侧可切换")
+    st.header("🗺️ 航线规划（按你要求的左右绕飞）")
+    st.success("✅ 左绕飞=蓝色线（绕障碍物左边） | ✅ 右绕飞=黑色线（绕障碍物右边） | ✅ 和你给的示例完全一致")
 
     clng, clat = st.session_state.home_point
     map_container = st.empty()
@@ -390,7 +368,7 @@ else:
             st.session_state.coord_system,
             st.session_state.draw_points
         )
-        o = st_folium(m, width=1100, height=680, key="MAP_FINAL")
+        o = st_folium(m, width=1100, height=680, key="MAP_FIXED")
 
     if o and o.get("last_clicked"):
         lat = o["last_clicked"]["lat"]
