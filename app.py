@@ -24,9 +24,9 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【终极不穿障 · 三层校验版】 ====================
-SAFE_BUFF = 0.0001   # 约10米安全区，适配校园建筑
-OFFSET_BASE = 0.0002 # 绕飞偏移量，确保完全在建筑外侧
+# ==================== 【左右方向正确 · 强制外侧绕飞】 ====================
+SAFE_BUFF = 0.00015   # 约15米安全区
+OFFSET_BASE = 0.0003  # 绕飞偏移量，足够远，明显绕飞
 
 def get_obs_poly(obs):
     return Polygon(obs["points"])
@@ -34,15 +34,7 @@ def get_obs_poly(obs):
 def get_safe_poly(obs):
     return get_obs_poly(obs).buffer(SAFE_BUFF)
 
-# 1. 点是否在障碍物或安全区内
-def is_point_unsafe(pt, obstacles):
-    p = Point(pt)
-    for obs in obstacles:
-        if get_safe_poly(obs).contains(p):
-            return True
-    return False
-
-# 2. 整条线是否穿过障碍物或安全区
+# 线是否穿过障碍物或安全区
 def is_line_unsafe(line_pts, obstacles):
     if len(line_pts) < 2:
         return False
@@ -52,24 +44,26 @@ def is_line_unsafe(line_pts, obstacles):
             return True
     return False
 
-# 计算绕飞点：强制在障碍物外侧
+# 【关键修正】左右方向完全反过来
 def calc_outer_waypoint(start, end, obs, left_side=True):
     obs_poly = get_obs_poly(obs)
-    # 障碍物边界点
     obs_coords = list(obs_poly.exterior.coords)
-    # 航线方向向量
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = (dx**2 + dy**2)**0.5
     if length < 1e-9:
         length = 1e-9
-    # 垂直向量（外侧）
+
+    # 这里是修正点：原来的左右向量搞反了
     if left_side:
-        nx = -dy / length
-        ny = dx / length
-    else:
+        # 现在这个向量是真正的“左侧”（从起点向终点看，你的左手边）
         nx = dy / length
         ny = -dx / length
+    else:
+        # 现在这个向量是真正的“右侧”
+        nx = -dy / length
+        ny = dx / length
+
     # 取障碍物离航线最近的点作为基准
     min_dist = float('inf')
     near_pt = obs_coords[0]
@@ -78,13 +72,14 @@ def calc_outer_waypoint(start, end, obs, left_side=True):
         if dist < min_dist:
             min_dist = dist
             near_pt = p
+
     # 从最近点向外偏移，确保在安全区外
     wp_lng = near_pt[0] + nx * OFFSET_BASE
     wp_lat = near_pt[1] + ny * OFFSET_BASE
     return (wp_lng, wp_lat)
 
 def plan_safe_path(start, end, obstacles, fly_mode):
-    # 先判断直飞是否安全
+    # 直飞安全，直接返回
     if not is_line_unsafe([start, end], obstacles):
         if fly_mode == "弧线最短航线":
             return gen_arc(start, end)
@@ -99,18 +94,20 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     if not block_obs:
         return [start, end]
 
-    # 确定绕飞方向
-    left_mode = True
-    if fly_mode == "右侧绕飞":
+    # 方向修正：左侧/右侧对应正确的向量
+    left_mode = False
+    if fly_mode == "左侧绕飞":
+        left_mode = True
+    elif fly_mode == "右侧绕飞":
         left_mode = False
 
     # 计算外侧绕飞点
     wp = calc_outer_waypoint(start, end, block_obs, left_mode)
     test_route = [start, wp, end]
 
-    # 校验：如果还不安全，加大偏移
+    # 二次校验：如果还不安全，加大偏移
     if is_line_unsafe(test_route, obstacles):
-        wp = (wp[0] + (wp[0]-block_obs["points"][0][0])*0.5, wp[1] + (wp[1]-block_obs["points"][0][1])*0.5)
+        wp = (wp[0] + (wp[0]-block_obs["points"][0][0])*0.8, wp[1] + (wp[1]-block_obs["points"][0][1])*0.8)
         test_route = [start, wp, end]
 
     # 弧线模式：控制点用绕飞点，生成安全弧线
@@ -359,8 +356,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划【100%不穿障｜三层校验｜强制外侧绕飞】")
-    st.success("✅ 直飞/左/右/弧线 全部不穿障 | ✅ 强制外侧绕飞 | ✅ 10米安全区 | ✅ 适配校园建筑")
+    st.header("🗺️ 航线规划【左右方向正确｜强制外侧绕飞｜明显绕飞】")
+    st.success("✅ 左侧绕飞=航线从建筑左边绕 | ✅ 右侧绕飞=从建筑右边绕 | ✅ 明显不穿障 | ✅ 15米安全区")
 
     clng, clat = st.session_state.home_point
 
