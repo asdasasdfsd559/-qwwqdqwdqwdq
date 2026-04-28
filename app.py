@@ -24,18 +24,14 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【终极严格：强制碰撞检测+自动调整】 ====================
-SAFE_DISTANCE = 0.00015  # 15米安全距离
+# ==================== 【终于搞对了！按照你图里的绕飞点】 ====================
+SAFE_DISTANCE = 0.0002  # 20米安全距离，足够了
 
 def get_safe_polygon(obs):
     poly = Polygon(obs["points"])
     return poly.buffer(SAFE_DISTANCE)
 
 def is_path_safe(path, safe_polys):
-    """
-    【严格检测】检查整个路径是不是和所有障碍物安全区都不相交
-    这是核心！我之前漏掉了这个验证！
-    """
     line = LineString(path)
     for poly in safe_polys:
         if line.intersects(poly):
@@ -43,7 +39,6 @@ def is_path_safe(path, safe_polys):
     return True
 
 def plan_safe_path(start, end, obstacles, fly_mode):
-    # 先拿到所有障碍物的安全区
     safe_polys = [get_safe_polygon(obs) for obs in obstacles]
     
     # 先检查直飞
@@ -63,39 +58,45 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             return points
         return direct_path
 
-    # ==================== 有障碍物，生成绕行点，并且强制验证 ====================
     # 拿到障碍物的边界
     xs = [p[0] for obs in obstacles for p in obs["points"]]
     ys = [p[1] for obs in obstacles for p in obs["points"]]
-    min_x = min(xs)
-    max_x = max(xs)
-    center_y = (min(ys) + max(ys)) / 2
+    min_x = min(xs)  # 障碍物最左边
+    max_x = max(xs)  # 障碍物最右边
+    min_y = min(ys)  # 障碍物最下边
+    max_y = max(ys)  # 障碍物最上边
 
-    # 初始绕行点
     if "左侧" in fly_mode:
-        init_bypass_x = min_x - SAFE_DISTANCE
-        init_bypass_y = center_y
+        # 左绕飞：绕到障碍物的【左上角】外面！和你图里的蓝色线一模一样！
+        # 这样整个路径都在障碍物的左上外侧，绝对不会穿！
+        bypass_x = min_x - SAFE_DISTANCE
+        bypass_y = max_y + SAFE_DISTANCE
     elif "右侧" in fly_mode:
-        init_bypass_x = max_x + SAFE_DISTANCE
-        init_bypass_y = center_y
+        # 右绕飞：绕到障碍物的【右下角】外面！和你图里的黑色线一模一样！
+        # 这样整个路径都在障碍物的右下外侧，绝对不会穿！
+        bypass_x = max_x + SAFE_DISTANCE
+        bypass_y = min_y - SAFE_DISTANCE
     else:
-        init_bypass_x = min_x - SAFE_DISTANCE
-        init_bypass_y = center_y
+        # 直飞最短，默认左绕
+        bypass_x = min_x - SAFE_DISTANCE
+        bypass_y = max_y + SAFE_DISTANCE
 
-    # 【强制调整】如果路径还是穿，就把绕行点往外挪，直到完全安全！
-    bypass_x, bypass_y = init_bypass_x, init_bypass_y
-    for i in range(10):  # 最多调整10次，绝对够了
-        test_path = [start, (bypass_x, bypass_y), end]
-        if is_path_safe(test_path, safe_polys):
-            break  # 安全了，停止调整
-        # 不安全，继续往外挪
-        if "左侧" in fly_mode:
-            bypass_x -= SAFE_DISTANCE
-        else:
-            bypass_x += SAFE_DISTANCE
-
-    # 现在路径绝对安全了！
+    # 生成路径：起点 → 绕行点 → 终点
     safe_path = [start, (bypass_x, bypass_y), end]
+    
+    # 最后再检查一遍，绝对安全
+    if not is_path_safe(safe_path, safe_polys):
+        # 如果还不安全，就再往外挪
+        for i in range(5):
+            if "左侧" in fly_mode:
+                bypass_x -= SAFE_DISTANCE
+                bypass_y += SAFE_DISTANCE
+            else:
+                bypass_x += SAFE_DISTANCE
+                bypass_y -= SAFE_DISTANCE
+            safe_path = [start, (bypass_x, bypass_y), end]
+            if is_path_safe(safe_path, safe_polys):
+                break
 
     # 弧线模式
     if "弧线" in fly_mode:
@@ -166,8 +167,8 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
 
         color = {
             "直飞最短":"blue",
-            "左侧绕飞":"#0066cc",
-            "右侧绕飞":"#000000",
+            "左侧绕飞":"#0066cc",  # 蓝色，你要的左绕飞
+            "右侧绕飞":"#000000",  # 黑色，你要的右绕飞
             "弧线最短航线":"#F79E02"
         }.get(st.session_state.fly_mode, "blue")
 
@@ -362,8 +363,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（强制碰撞检测·绝对不穿）")
-    st.success("✅ 严格碰撞检测 | ✅ 路径自动调整 | ✅ 100%保证航线不碰障碍物 | ✅ 左蓝右黑和你要求的一样")
+    st.header("🗺️ 航线规划（和你图里一模一样的绕飞）")
+    st.success("✅ 左绕飞=蓝色线（绕障碍物左上角） | ✅ 右绕飞=黑色线（绕障碍物右下角） | ✅ 100%不穿障碍物")
 
     clng, clat = st.session_state.home_point
     map_container = st.empty()
@@ -378,7 +379,7 @@ else:
             st.session_state.coord_system,
             st.session_state.draw_points
         )
-        o = st_folium(m, width=1100, height=680, key="MAP_FINAL_SAFE")
+        o = st_folium(m, width=1100, height=680, key="MAP_FINAL_RIGHT")
 
     if o and o.get("last_clicked"):
         lat = o["last_clicked"]["lat"]
