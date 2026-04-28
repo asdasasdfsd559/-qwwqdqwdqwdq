@@ -24,9 +24,9 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【左右方向正确 · 强制外侧绕飞】 ====================
-SAFE_BUFF = 0.00015   # 约15米安全区
-OFFSET_BASE = 0.0003  # 绕飞偏移量，足够远，明显绕飞
+# ==================== 【按地图视角定义左右，近距绕飞】 ====================
+SAFE_BUFF = 0.0001   # 约10米安全区
+OFFSET_BASE = 0.0002 # 绕飞偏移量，控制在建筑外10米，不绕远
 
 def get_obs_poly(obs):
     return Polygon(obs["points"])
@@ -44,38 +44,23 @@ def is_line_unsafe(line_pts, obstacles):
             return True
     return False
 
-# 【关键修正】左右方向完全反过来
-def calc_outer_waypoint(start, end, obs, left_side=True):
+# 【关键修正】按地图视角定义左右，不按航线方向
+def calc_view_side_waypoint(start, end, obs, left_side=True):
     obs_poly = get_obs_poly(obs)
     obs_coords = list(obs_poly.exterior.coords)
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    length = (dx**2 + dy**2)**0.5
-    if length < 1e-9:
-        length = 1e-9
+    # 取障碍物的中心点
+    cx = sum(p[0] for p in obs_coords) / len(obs_coords)
+    cy = sum(p[1] for p in obs_coords) / len(obs_coords)
 
-    # 这里是修正点：原来的左右向量搞反了
+    # 地图视角：
+    # 左侧绕飞 = 经度减小（地图上往左）
+    # 右侧绕飞 = 经度增大（地图上往右）
     if left_side:
-        # 现在这个向量是真正的“左侧”（从起点向终点看，你的左手边）
-        nx = dy / length
-        ny = -dx / length
+        wp_lng = cx - OFFSET_BASE
     else:
-        # 现在这个向量是真正的“右侧”
-        nx = -dy / length
-        ny = dx / length
+        wp_lng = cx + OFFSET_BASE
+    wp_lat = cy
 
-    # 取障碍物离航线最近的点作为基准
-    min_dist = float('inf')
-    near_pt = obs_coords[0]
-    for p in obs_coords:
-        dist = LineString([start, end]).distance(Point(p))
-        if dist < min_dist:
-            min_dist = dist
-            near_pt = p
-
-    # 从最近点向外偏移，确保在安全区外
-    wp_lng = near_pt[0] + nx * OFFSET_BASE
-    wp_lat = near_pt[1] + ny * OFFSET_BASE
     return (wp_lng, wp_lat)
 
 def plan_safe_path(start, end, obstacles, fly_mode):
@@ -94,20 +79,21 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     if not block_obs:
         return [start, end]
 
-    # 方向修正：左侧/右侧对应正确的向量
-    left_mode = False
+    # 方向定义：左侧/右侧对应地图视角
     if fly_mode == "左侧绕飞":
         left_mode = True
     elif fly_mode == "右侧绕飞":
         left_mode = False
+    else:
+        left_mode = True
 
-    # 计算外侧绕飞点
-    wp = calc_outer_waypoint(start, end, block_obs, left_mode)
+    # 计算绕飞点
+    wp = calc_view_side_waypoint(start, end, block_obs, left_mode)
     test_route = [start, wp, end]
 
-    # 二次校验：如果还不安全，加大偏移
+    # 二次校验：如果还不安全，微调偏移
     if is_line_unsafe(test_route, obstacles):
-        wp = (wp[0] + (wp[0]-block_obs["points"][0][0])*0.8, wp[1] + (wp[1]-block_obs["points"][0][1])*0.8)
+        wp = (wp[0] - (0.0001 if left_mode else -0.0001), wp[1])
         test_route = [start, wp, end]
 
     # 弧线模式：控制点用绕飞点，生成安全弧线
@@ -356,8 +342,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划【左右方向正确｜强制外侧绕飞｜明显绕飞】")
-    st.success("✅ 左侧绕飞=航线从建筑左边绕 | ✅ 右侧绕飞=从建筑右边绕 | ✅ 明显不穿障 | ✅ 15米安全区")
+    st.header("🗺️ 航线规划【按地图视角定义左右｜近距绕飞】")
+    st.success("✅ 左侧绕飞=从建筑左边绕 | ✅ 右侧绕飞=从建筑右边绕 | ✅ 不绕大圈 | ✅ 10米安全区")
 
     clng, clat = st.session_state.home_point
 
