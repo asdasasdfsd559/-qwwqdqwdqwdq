@@ -388,8 +388,9 @@ if "飞行监控" in st.session_state.page:
 
     c1, c2 = st.columns(2)
     with c1:
+        # 修复点1：先声明global，再使用变量
+        global GLOBAL_RUNNING
         if st.button("▶️ 开始心跳监测", use_container_width=True):
-            global GLOBAL_RUNNING
             if not GLOBAL_RUNNING:
                 GLOBAL_RUNNING = True
                 # 启动后台线程，严格1秒一次
@@ -397,14 +398,17 @@ if "飞行监控" in st.session_state.page:
                 t.start()
                 st.rerun()
     with c2:
+        # 修复点2：先声明global，再使用变量
+        global GLOBAL_RUNNING
         if st.button("⏸️ 暂停心跳监测", use_container_width=True):
-            global GLOBAL_RUNNING
             GLOBAL_RUNNING = False
             st.rerun()
 
     placeholder = st.empty()
 
     with placeholder.container():
+        # 修复点3：声明全局变量后再使用
+        global GLOBAL_HEARTBEAT_DATA
         df = pd.DataFrame(GLOBAL_HEARTBEAT_DATA)
         if not df.empty:
             st.line_chart(df, x="时间", y="序号", color="#ff4560")
