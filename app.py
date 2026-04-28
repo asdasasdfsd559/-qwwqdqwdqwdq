@@ -26,22 +26,11 @@ class CoordTransform:
         return lng-0.0005, lat-0.0003
 
 # ==================== 真正绕飞 · 安全避障核心 ====================
-SAFE_BUFFER = 0.00015  # 约15米绝对安全距离
-
-def get_obstacle_polygon(obs):
-    return Polygon(obs["points"])
+SAFE_BUFFER = 0.00015  # 约15米安全距离
 
 def get_safe_obstacle_polygon(obs):
     poly = Polygon(obs["points"])
     return poly.buffer(SAFE_BUFFER)
-
-def is_point_inside_any_obstacle(point, obstacles):
-    pt = Point(point)
-    for obs in obstacles:
-        safe_poly = get_safe_obstacle_polygon(obs)
-        if safe_poly.contains(pt):
-            return True
-    return False
 
 def is_path_fully_safe(path, obstacles):
     if len(path) < 2:
@@ -53,9 +42,14 @@ def is_path_fully_safe(path, obstacles):
             return False
     return True
 
-def get_safe_waypoint_around_obstacle(start, end, obs, fly_mode):
-    poly = get_obstacle_polygon(obs)
-    cx, cy = poly.centroid.x, poly.centroid.y
+def get_safe_waypoint_around_obstacle(start, end, obs, fly_mode, obstacles):
+    cx = obs["points"][0][0]
+    cy = obs["points"][0][1]
+    for p in obs["points"]:
+        cx += p[0]
+        cy += p[1]
+    cx /= len(obs["points"])
+    cy /= len(obs["points"])
 
     dx = end[0] - start[0]
     dy = end[1] - start[1]
@@ -93,7 +87,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             hit_obs = obs
             break
 
-    waypoint = get_safe_waypoint_around_obstacle(start, end, hit_obs, fly_mode)
+    waypoint = get_safe_waypoint_around_obstacle(start, end, hit_obs, fly_mode, obstacles)
     final_path = [start, waypoint, end]
 
     if fly_mode == "弧线最短航线":
@@ -102,8 +96,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     if is_path_fully_safe(final_path, obstacles):
         return final_path
 
-    wp2 = translate(Point(waypoint), xoff=0.0002, yoff=0.0002)
-    wp2 = (wp2.x, wp2.y)
+    wp2 = (waypoint[0] + 0.0002, waypoint[1] + 0.0002)
     return [start, waypoint, wp2, end]
 
 def generate_arc_path(start, end, control=None):
