@@ -3,6 +3,7 @@ import pandas as pd
 import time
 import json
 import os
+import threading
 from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
@@ -24,29 +25,19 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【终极避障】修复shapely导入错误 + 安全距离 ====================
+# ==================== 【终极避障】多段折线实现左右绕飞 ====================
 def get_safe_obstacle(obs):
-    """将障碍物向外膨胀，生成带安全距离的禁区（修复buffer调用方式）"""
     poly = Polygon(obs["points"])
-    # 0.0001约等于10米安全距离，buffer是几何对象的方法，不是导入的函数
-    safe_poly = poly.buffer(0.0001)
-    return safe_poly
+    return poly.buffer(0.0001)  # 10米安全区
 
 def is_path_safe(path, obstacles):
-    """检查整个路径是否在所有安全区之外"""
     if len(path) < 2:
         return True
     line = LineString(path)
     for obs in obstacles:
-        try:
-            safe_poly = get_safe_obstacle(obs)
-            if line.intersects(safe_poly):
-                return False
-        except:
-            # 兼容异常情况，确保程序不崩溃
-            poly = Polygon(obs["points"])
-            if line.intersects(poly):
-                return False
+        safe_poly = get_safe_obstacle(obs)
+        if line.intersects(safe_poly):
+            return False
     return True
 
 def plan_safe_path(start, end, obstacles, fly_mode):
@@ -54,19 +45,13 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     end_pt = Point(end)
     direct_line = LineString([start, end])
 
-    # 找挡路的障碍物（包含安全区）
+    # 找挡路的障碍物
     hit_obs = None
     for obs in obstacles:
-        try:
-            safe_poly = get_safe_obstacle(obs)
-            if direct_line.intersects(safe_poly):
-                hit_obs = obs
-                break
-        except:
-            poly = Polygon(obs["points"])
-            if direct_line.intersects(poly):
-                hit_obs = obs
-                break
+        safe_poly = get_safe_obstacle(obs)
+        if direct_line.intersects(safe_poly):
+            hit_obs = obs
+            break
 
     # 无障碍物，直接直飞
     if hit_obs is None:
@@ -75,8 +60,8 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             dy = end[1] - start[1]
             mid_lng = (start[0] + end[0]) / 2
             mid_lat = (start[1] + end[1]) / 2
-            ctrl_x = mid_lng - dy * 0.2
-            ctrl_y = mid_lat + dx * 0.2
+            ctrl_x = mid_lng - dy * 0.3
+            ctrl_y = mid_lat + dx * 0.3
             arc_points = []
             for t in [i/20 for i in range(21)]:
                 clng = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
@@ -85,7 +70,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             return arc_points
         return [start, end]
 
-    # 计算飞行方向向量
+    # 飞行方向向量
     dx = end[0] - start[0]
     dy = end[1] - start[1]
     length = (dx**2 + dy**2)**0.5 if dx**2 + dy**2 > 0 else 1
@@ -94,46 +79,37 @@ def plan_safe_path(start, end, obstacles, fly_mode):
 
     # 障碍物中心
     poly = Polygon(hit_obs["points"])
-    cx = poly.centroid.x
-    cy = poly.centroid.y
+    cx, cy = poly.centroid.x, poly.centroid.y
 
-    # 确定绕飞方向
+    # 用两段折线实现左/右绕飞
     if fly_mode == "左侧绕飞":
-        perp_x = -dy_norm
-        perp_y = dx_norm
+        # 左侧绕飞：起飞→障碍物左上侧→障碍物右上侧→降落
+        wp1 = (cx - dy_norm * 0.0006, cy + dx_norm * 0.0006)
+        wp2 = (cx + dy_norm * 0.0003, cy - dx_norm * 0.0003)
+        path = [start, wp1, wp2, end]
+        if is_path_safe(path, obstacles):
+            return path
     elif fly_mode == "右侧绕飞":
-        perp_x = dy_norm
-        perp_y = -dx_norm
-    else:
-        perp_x = -dy_norm
-        perp_y = dx_norm
-
-    # 【核心】从障碍物中心向外推，直到路径完全安全
-    for offset in [0.0002, 0.0003, 0.0004, 0.0005]:
-        waypoint = (cx + perp_x * offset, cy + perp_y * offset)
-        test_path = [start, waypoint, end]
-        if is_path_safe(test_path, obstacles):
-            if fly_mode == "弧线最短航线":
-                arc_points = []
-                for t in [i/20 for i in range(21)]:
-                    clng = (1-t)**2 * start[0] + 2*(1-t)*t * waypoint[0] + t**2 * end[0]
-                    clat = (1-t)**2 * start[1] + 2*(1-t)*t * waypoint[1] + t**2 * end[1]
-                    arc_points.append((clng, clat))
-                return arc_points
-            else:
-                return test_path
-
-    # 兜底：用最大偏移
-    waypoint = (cx + perp_x * 0.0005, cy + perp_y * 0.0005)
-    if fly_mode == "弧线最短航线":
+        # 右侧绕飞：起飞→障碍物右下侧→障碍物左下侧→降落
+        wp1 = (cx + dy_norm * 0.0006, cy - dx_norm * 0.0006)
+        wp2 = (cx - dy_norm * 0.0003, cy + dx_norm * 0.0003)
+        path = [start, wp1, wp2, end]
+        if is_path_safe(path, obstacles):
+            return path
+    elif fly_mode == "弧线最短航线":
+        ctrl_x = cx - dy_norm * 0.0006
+        ctrl_y = cy + dx_norm * 0.0006
         arc_points = []
         for t in [i/20 for i in range(21)]:
-            clng = (1-t)**2 * start[0] + 2*(1-t)*t * waypoint[0] + t**2 * end[0]
-            clat = (1-t)**2 * start[1] + 2*(1-t)*t * waypoint[1] + t**2 * end[1]
+            clng = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
+            clat = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl_y + t**2 * end[1]
             arc_points.append((clng, clat))
-        return arc_points
-    else:
-        return [start, waypoint, end]
+        if is_path_safe(arc_points, obstacles):
+            return arc_points
+
+    # 兜底方案：通用左绕飞
+    wp = (cx - dy_norm * 0.0006, cy + dx_norm * 0.0006)
+    return [start, wp, end]
 
 # ==================== 地图 ====================
 def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
@@ -174,7 +150,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
             popup="🚩 降落点"
         ).add_to(m)
 
-    # 障碍物（红色本体）
+    # 障碍物
     for ob in obstacles:
         ps=[]
         for p in ob['points']:
@@ -216,6 +192,18 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
     folium.LayerControl().add_to(m)
     return m
 
+# ==================== 心跳包线程（严格1秒间隔） ====================
+def heartbeat_thread():
+    while st.session_state.running:
+        st.session_state.seq += 1
+        t = get_beijing_time_str()
+        st.session_state.heartbeat_data.append({
+            "序号": st.session_state.seq, "时间": t, "状态": "在线正常"
+        })
+        if len(st.session_state.heartbeat_data) > 60:
+            st.session_state.heartbeat_data.pop(0)
+        time.sleep(1)
+
 # ==================== 保存/加载 ====================
 STATE_FILE = "ground_station_state.json"
 def save_state():
@@ -239,6 +227,12 @@ def load_state():
 # ==================== 初始化 ====================
 if 'page' not in st.session_state:
     st.session_state.page="飞行监控"
+if 'heartbeat_data' not in st.session_state:
+    st.session_state.heartbeat_data = []
+    st.session_state.seq = 0
+    st.session_state.running = False
+if 'heartbeat_thread' not in st.session_state:
+    st.session_state.heartbeat_thread = None
 
 loaded = load_state()
 
@@ -345,33 +339,25 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控 ====================
+# ==================== 飞行监控（严格1秒心跳） ====================
 if "飞行监控" in st.session_state.page:
-    st.header("📡 飞行监控")
-
-    if "heartbeat_data" not in st.session_state:
-        st.session_state.heartbeat_data = []
-        st.session_state.seq = 0
-        st.session_state.running = False
+    st.header("📡 飞行监控（1秒/次心跳）")
 
     c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ 开始心跳监测", use_container_width=True):
-            st.session_state.running = True
+            if not st.session_state.running:
+                st.session_state.running = True
+                # 启动后台线程
+                st.session_state.heartbeat_thread = threading.Thread(target=heartbeat_thread, daemon=True)
+                st.session_state.heartbeat_thread.start()
+                st.rerun()
     with c2:
         if st.button("⏸️ 暂停心跳监测", use_container_width=True):
             st.session_state.running = False
+            st.rerun()
 
     placeholder = st.empty()
-
-    if st.session_state.running:
-        st.session_state.seq += 1
-        t = get_beijing_time_str()
-        st.session_state.heartbeat_data.append({
-            "序号": st.session_state.seq, "时间": t, "状态": "在线正常"
-        })
-        if len(st.session_state.heartbeat_data) > 60:
-            st.session_state.heartbeat_data.pop(0)
 
     with placeholder.container():
         df = pd.DataFrame(st.session_state.heartbeat_data)
@@ -379,14 +365,10 @@ if "飞行监控" in st.session_state.page:
             st.line_chart(df, x="时间", y="序号", color="#ff4560")
             st.dataframe(df, use_container_width=True, height=200)
 
-    if st.session_state.running:
-        time.sleep(1)
-        st.rerun()
-
 # ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（带安全距离版）")
-    st.success("✅ 修复导入错误 | ✅ 障碍物膨胀安全区 | ✅ 航线不碰边界")
+    st.header("🗺️ 航线规划（多段折线版）")
+    st.success("✅ 多段折线实现左/右绕飞 | ✅ 10米安全区 | ✅ 弧线避障")
 
     clng, clat = st.session_state.home_point
 
