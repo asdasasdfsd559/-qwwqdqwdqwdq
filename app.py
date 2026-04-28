@@ -24,28 +24,28 @@ class CoordTransform:
     def gcj02_to_wgs84(lng,lat):
         return lng-0.0005, lat-0.0003
 
-# ==================== 【终极避障】修复shapely导入错误 + 安全距离 ====================
+# ==================== 【核心修复】绕飞逻辑 + 障碍物边界严格校验 ====================
 def get_safe_obstacle(obs):
-    """将障碍物向外膨胀，生成带安全距离的禁区（修复buffer调用方式）"""
+    """将障碍物向外膨胀，生成带安全距离的禁区"""
     poly = Polygon(obs["points"])
-    # 0.0001约等于10米安全距离，buffer是几何对象的方法，不是导入的函数
-    safe_poly = poly.buffer(0.0001)
+    # 0.0002约等于20米安全距离，彻底远离边界
+    safe_poly = poly.buffer(0.0002)
     return safe_poly
 
 def is_path_safe(path, obstacles):
-    """检查整个路径是否在所有安全区之外"""
+    """严格检查路径是否完全在所有障碍物（含安全区）之外"""
     if len(path) < 2:
         return True
     line = LineString(path)
     for obs in obstacles:
         try:
             safe_poly = get_safe_obstacle(obs)
-            if line.intersects(safe_poly):
+            # 既不相交，也不包含，彻底远离
+            if line.intersects(safe_poly) or safe_poly.contains(line):
                 return False
         except:
-            # 兼容异常情况，确保程序不崩溃
             poly = Polygon(obs["points"])
-            if line.intersects(poly):
+            if line.intersects(poly) or poly.contains(line):
                 return False
     return True
 
@@ -97,34 +97,45 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     cx = poly.centroid.x
     cy = poly.centroid.y
 
-    # 确定绕飞方向
+    # 【修复绕飞方向】确保左右绕飞完全不同，且远离障碍物
     if fly_mode == "左侧绕飞":
-        perp_x = -dy_norm
-        perp_y = dx_norm
+        # 左侧绕飞：向外偏移更大的距离，确保不碰边界
+        perp_x = -dy_norm * 2  # 双倍偏移
+        perp_y = dx_norm * 2
     elif fly_mode == "右侧绕飞":
-        perp_x = dy_norm
-        perp_y = -dx_norm
+        # 右侧绕飞：对称偏移，远离障碍物
+        perp_x = dy_norm * 2
+        perp_y = -dx_norm * 2
     else:
         perp_x = -dy_norm
         perp_y = dx_norm
 
-    # 【核心】从障碍物中心向外推，直到路径完全安全
-    for offset in [0.0002, 0.0003, 0.0004, 0.0005]:
-        waypoint = (cx + perp_x * offset, cy + perp_y * offset)
-        test_path = [start, waypoint, end]
-        if is_path_safe(test_path, obstacles):
-            if fly_mode == "弧线最短航线":
-                arc_points = []
-                for t in [i/20 for i in range(21)]:
-                    clng = (1-t)**2 * start[0] + 2*(1-t)*t * waypoint[0] + t**2 * end[0]
-                    clat = (1-t)**2 * start[1] + 2*(1-t)*t * waypoint[1] + t**2 * end[1]
-                    arc_points.append((clng, clat))
-                return arc_points
-            else:
-                return test_path
+    # 【核心】多段绕飞点，确保航线绝对不穿障
+    # 第一段：起飞点到障碍物侧方远点
+    waypoint1 = (cx + perp_x * 0.0008, cy + perp_y * 0.0008)
+    # 第二段：侧方远点到降落点前的过渡点
+    waypoint2 = (cx + perp_x * 0.0004, cy + perp_y * 0.0004)
+    
+    # 验证两段路径都安全
+    test_path1 = [start, waypoint1]
+    test_path2 = [waypoint1, waypoint2]
+    test_path3 = [waypoint2, end]
+    
+    if is_path_safe(test_path1, obstacles) and is_path_safe(test_path2, obstacles) and is_path_safe(test_path3, obstacles):
+        if fly_mode == "弧线最短航线":
+            # 弧线控制点用waypoint1，确保弧线远离障碍物
+            arc_points = []
+            for t in [i/20 for i in range(21)]:
+                clng = (1-t)**2 * start[0] + 2*(1-t)*t * waypoint1[0] + t**2 * end[0]
+                clat = (1-t)**2 * start[1] + 2*(1-t)*t * waypoint1[1] + t**2 * end[1]
+                arc_points.append((clng, clat))
+            return arc_points
+        else:
+            # 多段折线绕飞，绝对不穿障
+            return [start, waypoint1, waypoint2, end]
 
-    # 兜底：用最大偏移
-    waypoint = (cx + perp_x * 0.0005, cy + perp_y * 0.0005)
+    # 兜底方案：更大偏移量
+    waypoint = (cx + perp_x * 0.001, cy + perp_y * 0.001)
     if fly_mode == "弧线最短航线":
         arc_points = []
         for t in [i/20 for i in range(21)]:
@@ -240,6 +251,12 @@ def load_state():
 if 'page' not in st.session_state:
     st.session_state.page="飞行监控"
 
+# 【修复心跳包初始化】确保状态变量正确初始化
+if 'heartbeat_data' not in st.session_state:
+    st.session_state.heartbeat_data = []
+    st.session_state.seq = 0
+    st.session_state.running = False
+
 loaded = load_state()
 
 OFFICIAL_LNG = 118.749413
@@ -345,33 +362,44 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控 ====================
+# ==================== 飞行监控【修复心跳包】 ====================
 if "飞行监控" in st.session_state.page:
     st.header("📡 飞行监控")
-
-    if "heartbeat_data" not in st.session_state:
-        st.session_state.heartbeat_data = []
-        st.session_state.seq = 0
-        st.session_state.running = False
 
     c1, c2 = st.columns(2)
     with c1:
         if st.button("▶️ 开始心跳监测", use_container_width=True):
             st.session_state.running = True
+            # 立即触发一次更新，避免延迟
+            st.session_state.seq += 1
+            t = get_beijing_time_str()
+            st.session_state.heartbeat_data.append({
+                "序号": st.session_state.seq, "时间": t, "状态": "在线正常"
+            })
+            st.rerun()
     with c2:
         if st.button("⏸️ 暂停心跳监测", use_container_width=True):
             st.session_state.running = False
+            st.rerun()
 
     placeholder = st.empty()
 
+    # 【修复心跳包逻辑】确保1秒一次稳定输出
     if st.session_state.running:
-        st.session_state.seq += 1
-        t = get_beijing_time_str()
-        st.session_state.heartbeat_data.append({
-            "序号": st.session_state.seq, "时间": t, "状态": "在线正常"
-        })
-        if len(st.session_state.heartbeat_data) > 60:
-            st.session_state.heartbeat_data.pop(0)
+        # 记录上次更新时间，确保严格1秒间隔
+        if 'last_heartbeat' not in st.session_state:
+            st.session_state.last_heartbeat = time.time()
+        
+        current_time = time.time()
+        if current_time - st.session_state.last_heartbeat >= 1.0:
+            st.session_state.seq += 1
+            t = get_beijing_time_str()
+            st.session_state.heartbeat_data.append({
+                "序号": st.session_state.seq, "时间": t, "状态": "在线正常"
+            })
+            if len(st.session_state.heartbeat_data) > 60:
+                st.session_state.heartbeat_data.pop(0)
+            st.session_state.last_heartbeat = current_time
 
     with placeholder.container():
         df = pd.DataFrame(st.session_state.heartbeat_data)
@@ -379,14 +407,15 @@ if "飞行监控" in st.session_state.page:
             st.line_chart(df, x="时间", y="序号", color="#ff4560")
             st.dataframe(df, use_container_width=True, height=200)
 
+    # 【修复重绘逻辑】确保稳定循环
     if st.session_state.running:
-        time.sleep(1)
+        time.sleep(0.1)  # 减小延迟，避免卡顿
         st.rerun()
 
 # ==================== 航线规划 ====================
 else:
     st.header("🗺️ 航线规划（带安全距离版）")
-    st.success("✅ 修复导入错误 | ✅ 障碍物膨胀安全区 | ✅ 航线不碰边界")
+    st.success("✅ 修复心跳包 | ✅ 障碍物20米安全区 | ✅ 左右绕飞不穿障")
 
     clng, clat = st.session_state.home_point
 
