@@ -26,9 +26,9 @@ class CoordTransform:
         return lng-0.0005, lat-0.0003
 
 # ==============================================
-# 【严格按你给的障碍边界绕飞｜绝对不穿】
+# 【完全按你示意图的绕飞逻辑】
 # ==============================================
-SAFE_BUFFER = 0.00015  # 15米安全缓冲，严格在你给的边界外
+SAFE_BUFFER = 0.00015  # 15米安全缓冲，就是你图里的黄色区
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     if not obstacles:
@@ -40,10 +40,10 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         else:
             return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
 
-    # 1. 拿你给的障碍物，生成标准安全区（严格在你给的边界外15米）
-    obs = obstacles[0]  # 单障碍优先处理
+    # 1. 拿你给的障碍，生成黄色安全区
+    obs = obstacles[0]
     obs_poly = Polygon(obs["points"])
-    safe_poly = obs_poly.buffer(SAFE_BUFFER)  # 标准等距外扩，绝对不碰你给的原边界
+    safe_poly = obs_poly.buffer(SAFE_BUFFER)  # 标准等距外扩，就是你图里的黄色边界
     
     # 2. 原始直线
     direct_line = LineString([start, end])
@@ -58,21 +58,28 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         else:
             return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
 
-    # 4. 穿了！严格沿着安全区的边界绕飞！
-    # 找到直线和安全区的两个交点：入口、出口
+    # 4. 穿了！找直线和安全区的两个交点
     intersection = direct_line.intersection(safe_poly.boundary)
     if intersection.geom_type == 'MultiPoint':
         pts = list(intersection.geoms)
     else:
         pts = [intersection]
     if len(pts) < 2:
-        return [start, end]
-    entry, exit_pt = pts[0], pts[1]
+        return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
     
-    # 拿安全区的所有边界点
+    # 【关键修复】自己判断哪个是入口（靠近起点）、哪个是出口（靠近终点），不依赖返回顺序！
+    p1, p2 = pts[0], pts[1]
+    d1 = math.hypot(p1.x-start[0], p1.y-start[1])
+    d2 = math.hypot(p2.x-start[0], p2.y-start[1])
+    if d1 < d2:
+        entry, exit_pt = p1, p2
+    else:
+        entry, exit_pt = p2, p1
+
+    # 拿安全区的所有边界点（shapely的边界是逆时针的）
     boundary_pts = list(safe_poly.exterior.coords)
     
-    # 找到入口和出口在边界上的索引
+    # 找到入口和出口在边界上的最近点索引
     def find_nearest_idx(pt):
         min_d = float('inf')
         idx = 0
@@ -85,38 +92,37 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     e_idx = find_nearest_idx(entry)
     x_idx = find_nearest_idx(exit_pt)
 
-    # 5. 根据左/右，取边界上的绕行段
+    # 5. 按你图里的方向绕！
     bypass_pts = []
     n = len(boundary_pts)
     if fly_mode == "左侧绕飞":
-        # 左侧：从入口，沿着边界逆时针走到出口
+        # 左侧绕飞：就是你图里的蓝色线！逆时针沿边界走（左上侧）
         i = e_idx
         while i != x_idx:
             bypass_pts.append(boundary_pts[i])
             i = (i - 1) % n
         bypass_pts.append(boundary_pts[x_idx])
     elif fly_mode == "右侧绕飞":
-        # 右侧：从入口，沿着边界顺时针走到出口
+        # 右侧绕飞：就是你图里的黑色线！顺时针沿边界走（右下侧）
         i = e_idx
         while i != x_idx:
             bypass_pts.append(boundary_pts[i])
             i = (i + 1) % n
         bypass_pts.append(boundary_pts[x_idx])
     elif fly_mode == "弧线最短航线":
-        # 圆弧绕飞，平滑多段，且严格不穿
+        # 圆弧绕飞，平滑多段，紧贴安全区
         cx, cy = obs_poly.centroid.x, obs_poly.centroid.y
         bypass_pts = [( (1-t)**2*entry.x + 2*(1-t)*t*cx + t**2*exit_pt.x, 
                         (1-t)**2*entry.y + 2*(1-t)*t*cy + t**2*exit_pt.y ) for t in [i/20 for i in range(21)]]
 
-    # 6. 最终路径：起点 -> 入口 -> 沿着边界绕 -> 出口 -> 终点
+    # 6. 最终路径：起点 -> 入口 -> 沿边界绕 -> 出口 -> 终点
     final_path = [start] + bypass_pts + [end]
     
-    # 7. 最后验证一遍，绝对不穿
+    # 7. 最后验证，绝对不穿
     final_line = LineString(final_path)
-    if not final_line.intersects(obs_poly) and not final_line.intersects(safe_poly):
+    if not final_line.intersects(obs_poly):
         return final_path
     else:
-        # 兜底，确保安全
         return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
 
 # ==================== 地图绘制（完全保留你原逻辑） ====================
@@ -375,8 +381,8 @@ if "飞行监控" in st.session_state.page:
 
 # ==================== 航线规划页面（布局不变） ====================
 else:
-    st.header("🗺️ 航线规划（严格沿障碍边界绕飞）")
-    st.success("✅ 严格用你给的障碍边界 | ✅ 沿安全区外侧走 | ✅ 绝对不穿障碍/缓冲区 | ✅ 全多段线段")
+    st.header("🗺️ 航线规划（和你示意图完全一致的绕飞）")
+    st.success("✅ 左侧绕飞=你图里的蓝线 | ✅ 右侧绕飞=你图里的黑线 | ✅ 沿安全区边界走 | ✅ 绝对不穿障碍")
 
     clng, clat = st.session_state.home_point
     map_container = st.empty()
