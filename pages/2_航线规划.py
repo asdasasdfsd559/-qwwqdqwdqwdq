@@ -211,7 +211,7 @@ def global_smooth_path(points, num_segments=50):
             t2 = t*t
             t3 = t2*t
             x = 0.5 * (2*p1[0] + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
-            y = 0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+            y = 0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[0]-3*p2[1]+p3[1])*t3)
             smooth.append((x, y))
     
     uniq = []
@@ -250,7 +250,7 @@ def global_bezier_smooth(points):
 
 # ==================== 地图绘制 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("map_zoom", 19),
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("zoom", 19),
                    control_scale=True, tiles=None)
 
     folium.TileLayer(
@@ -295,12 +295,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         # 绘制路径：折线/曲线区分显示
         folium.PolyLine(route, color=color, weight=5, opacity=1, popup="无人机航线").add_to(m)
         
-        # 折线绕飞时，标记每个拐点（可选，便于查看分段）
-        if fly_mode in ["左侧绕飞", "右侧绕飞"] and len(route) > 2:
-            for i, (lat, lng) in enumerate(route):
-                if i > 0 and i < len(route)-1:  # 仅标记中间拐点
-                    folium.CircleMarker([lat, lng], radius=3, color='yellow', fill=True, 
-                                       popup=f"拐点 {i}").add_to(m)
+        # 🔥 已删除：左右绕飞的黄色拐点标记，现在是纯折线！
 
     if len(temp_points) >= 3:
         ps = [[lat, lng] for lng, lat in temp_points]
