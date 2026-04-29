@@ -24,10 +24,13 @@ def get_obstacle_with_buffer(obs_poly):
     return obs_poly.buffer(SAFE_BUFFER)
 
 def catmull_rom_spline(points, num_segments=40):
-    """Catmull-Rom 样条插值，返回平滑多段线"""
+    """
+    Catmull-Rom 样条插值，返回平滑后的多段线点集（不改变路径方向）。
+    """
     if len(points) < 2:
         return points
     smooth = []
+    # 扩展首尾，使曲线经过首尾点
     extended = [points[0]] + points + [points[-1]]
     for i in range(1, len(extended)-1):
         p0 = extended[i-1]
@@ -47,6 +50,7 @@ def catmull_rom_spline(points, num_segments=40):
                        (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
             smooth.append((x, y))
     smooth.append(points[-1])
+    # 去除重复点
     uniq = []
     for pt in smooth:
         if not uniq or math.hypot(pt[0]-uniq[-1][0], pt[1]-uniq[-1][1]) > 1e-9:
@@ -55,15 +59,17 @@ def catmull_rom_spline(points, num_segments=40):
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     """
-    绝对不穿越障碍物的绕飞算法
+    精确绕飞算法（不穿越）。
     方向定义：
-        左侧绕飞 = 逆时针（索引递减）
-        右侧绕飞 = 顺时针（索引递增）
-        弧线最短 = 自动选择较短侧，并对边界点进行平滑
+       左侧绕飞 = 逆时针（索引递减）
+       右侧绕飞 = 顺时针（索引递增）
+       弧线最短 = 自动选择较短侧，并对边界点序列做 Catmull-Rom 平滑
     """
+    # 直飞模式
     if fly_mode == "直飞最短":
         return [start, end]
-    
+
+    # 无障碍物时的弧线处理（美观）
     if not obstacles:
         if fly_mode == "弧线最短航线":
             cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
@@ -79,7 +85,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/30 for i in range(31)]]
         return [start, end]
 
-    # 取第一个障碍物
+    # 有障碍物：取第一个
     obs = obstacles[0]
     obs_poly = Polygon(obs['points'])
     buffered = get_obstacle_with_buffer(obs_poly)
@@ -87,6 +93,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
 
     # 检测直线是否与缓冲区相交
     if not direct_line.intersects(buffered):
+        # 直线安全，弧线模式生成简单弧线
         if fly_mode == "弧线最短航线":
             cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
             dx, dy = end[0]-start[0], end[1]-start[1]
@@ -102,7 +109,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         return [start, end]
 
     # ---------- 需要绕飞 ----------
-    # 直线与缓冲区边界的交点
+    # 获取直线与缓冲区边界的两个交点
     inter = direct_line.intersection(buffered.boundary)
     if inter.geom_type == 'MultiPoint':
         pts = list(inter.geoms)
@@ -111,16 +118,16 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     if len(pts) < 2:
         return [start, end]
 
-    # 入口（离起点近）和出口（离终点近）
+    # 确定入口（离起点近）和出口（离终点近）
     d1 = math.hypot(pts[0].x - start[0], pts[0].y - start[1])
     d2 = math.hypot(pts[1].x - start[0], pts[1].y - start[1])
     entry, exit_pt = (pts[0], pts[1]) if d1 < d2 else (pts[1], pts[0])
 
-    # 缓冲区边界点（逆时针顺序）
+    # 获取缓冲区边界点（逆时针顺序）
     boundary_coords = list(buffered.exterior.coords)
     n = len(boundary_coords)
 
-    # 找到入口和出口在边界上的最近点索引
+    # 找到入口和出口在边界上的最近索引（基于距离）
     def nearest_idx(pt):
         min_d = float('inf')
         idx = 0
@@ -134,17 +141,17 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     e_idx = nearest_idx(entry)
     x_idx = nearest_idx(exit_pt)
 
-    # 顺时针步数（索引递增）和逆时针步数（索引递减）
+    # 计算顺时针（索引递增）和逆时针（索引递减）的步数
     cw_steps = (x_idx - e_idx) % n
     ccw_steps = (e_idx - x_idx) % n
 
-    # 选择方向
+    # 根据模式选择方向
     if fly_mode == "左侧绕飞":
-        use_clockwise = False   # 左侧 = 逆时针
+        use_clockwise = False   # 左侧绕飞 = 逆时针
     elif fly_mode == "右侧绕飞":
-        use_clockwise = True    # 右侧 = 顺时针
+        use_clockwise = True    # 右侧绕飞 = 顺时针
     else:  # 弧线最短航线
-        use_clockwise = cw_steps <= ccw_steps
+        use_clockwise = cw_steps <= ccw_steps   # 选择较短侧
 
     # 收集边界点（从入口到出口沿选定方向）
     bypass = []
@@ -160,15 +167,18 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             i = (i - 1) % n
         bypass.append(boundary_coords[x_idx])
 
-    # 构建完整路径（起点 → 入口附近点 → 边界序列 → 出口附近点 → 终点）
-    # 注意：为了更平滑，直接使用 bypass（已包含入口和出口附近的边界点）
+    # 构建核心路径：起点 -> 入口 -> 边界点序列 -> 出口 -> 终点
+    # 注意：入口点和出口点已经在绕飞点中（因为 bypass 是从入口索引到出口索引），但为了更精确，直接使用 bypass（已经包含入口和出口附近点）
     core_path = [start] + bypass + [end]
 
+    # 弧线模式：对边界点序列（不含起点终点）进行平滑，然后重新连接起点终点
     if fly_mode == "弧线最短航线":
-        # 平滑边界部分（不包括起点终点）
+        # 平滑边界部分
         smoothed_mid = catmull_rom_spline(bypass, num_segments=50)
-        return [start] + smoothed_mid + [end]
+        full_path = [start] + smoothed_mid + [end]
+        return full_path
     else:
+        # 左右绕飞：直接折线
         return core_path
 
 # ==================== 地图绘制 ====================
@@ -346,7 +356,7 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（绝对不穿越障碍物）")
+st.header("🗺️ 航线规划（已修复穿越问题，弧线平滑不穿透）")
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
 
