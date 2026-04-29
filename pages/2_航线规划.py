@@ -8,7 +8,6 @@ from shapely.geometry import Point, LineString, Polygon
 
 st.set_page_config(page_title="航线规划", layout="wide")
 
-# ==================== 辅助函数 ====================
 class CoordTransform:
     @staticmethod
     def wgs84_to_gcj02(lng, lat):
@@ -47,7 +46,10 @@ def smooth_curve(points, num_per_segment=30, offset_factor=0.3):
     smooth.append(points[-1])
     return smooth
 
-def plan_safe_path(start, end, obstacles, fly_mode, swap_direction):
+def plan_safe_path(start, end, obstacles, fly_mode):
+    """
+    固定方向：左侧绕飞=顺时针，右侧绕飞=逆时针
+    """
     if fly_mode == "直飞最短":
         return [start, end]
 
@@ -121,17 +123,11 @@ def plan_safe_path(start, end, obstacles, fly_mode, swap_direction):
     x_idx = find_nearest_idx(exit_pt)
     n = len(boundary_pts)
 
-    if swap_direction:
-        left_dir = -1   # 逆时针
-        right_dir = 1   # 顺时针
-    else:
-        left_dir = 1    # 顺时针
-        right_dir = -1  # 逆时针
-
+    # 固定方向：左侧绕飞 = 顺时针 (direction=1)，右侧绕飞 = 逆时针 (direction=-1)
     if fly_mode == "左侧绕飞":
-        direction = left_dir
+        direction = 1
     elif fly_mode == "右侧绕飞":
-        direction = right_dir
+        direction = -1
     else:  # 弧线自动选短边
         len_cw = (x_idx - e_idx) % n
         len_ccw = (e_idx - x_idx) % n
@@ -157,7 +153,7 @@ def plan_safe_path(start, end, obstacles, fly_mode, swap_direction):
     else:
         return [start] + bypass_pts + [end]
 
-def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode, swap_direction):
+def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=19, control_scale=True, tiles=None)
 
     folium.TileLayer(
@@ -184,7 +180,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.5, popup=f"{ob['name']}").add_to(m)
 
     if len(waypoints) >= 2:
-        safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode, swap_direction)
+        safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode)
         route = []
         for lng, lat in safe_path:
             if coord_system != 'gcj02':
@@ -219,8 +215,7 @@ def save_state():
         "coord_system": st.session_state.coord_system,
         "obstacles": st.session_state.obstacles,
         "draw_points": st.session_state.draw_points,
-        "fly_mode": st.session_state.fly_mode,
-        "swap_direction": st.session_state.swap_direction
+        "fly_mode": st.session_state.fly_mode
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -244,8 +239,7 @@ if "home_point" not in st.session_state:
         "obstacles": [],
         "draw_points": [],
         "last_click": None,
-        "fly_mode": "左侧绕飞",
-        "swap_direction": False
+        "fly_mode": "左侧绕飞"
     }
     for k, v in defaults.items():
         if loaded and k in loaded:
@@ -253,7 +247,7 @@ if "home_point" not in st.session_state:
         else:
             st.session_state[k] = v
 
-# ==================== 侧边栏 ====================
+# ==================== 侧边栏控件 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -283,7 +277,7 @@ with st.sidebar:
     st.session_state.fly_mode = st.selectbox(
         "绕飞模式", ["直飞最短", "左侧绕飞", "右侧绕飞", "弧线最短航线"]
     )
-    st.session_state.swap_direction = st.checkbox("交换左右方向", value=st.session_state.swap_direction)
+    # 已删除“交换左右方向”复选框
 
     st.subheader("✈️ 航线")
     if st.button("生成航线"):
@@ -330,8 +324,8 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（地图永不闪烁）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode}  |  方向交换：{'是' if st.session_state.swap_direction else '否'}")
+st.header("🗺️ 航线规划（左侧绕飞=顺时针，右侧绕飞=逆时针）")
+st.success(f"✅ 当前模式：{st.session_state.fly_mode}")
 
 clng, clat = st.session_state.home_point
 m = create_map(
@@ -342,8 +336,7 @@ m = create_map(
     st.session_state.obstacles,
     st.session_state.coord_system,
     st.session_state.draw_points,
-    st.session_state.fly_mode,
-    st.session_state.swap_direction
+    st.session_state.fly_mode
 )
 o = st_folium(m, width=1100, height=680, key="main_map")
 
