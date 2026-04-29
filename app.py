@@ -25,26 +25,27 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0003
 
-# ========== 安全缓冲区（用于路径规划，不在地图上绘制） ==========
+# ========== 安全缓冲区（仅用于路径规划，不绘制） ==========
 SAFE_BUFFER = 0.00015   # 约15米
 
 def get_obstacle_with_buffer(obs_poly):
-    """返回带缓冲的障碍物多边形（仅用于路径计算）"""
     return obs_poly.buffer(SAFE_BUFFER)
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     """
-    统一避障规划：
-    - 直飞最短：无视障碍物，直接直线
-    - 左侧绕飞 / 右侧绕飞 / 弧线最短航线：均会避开障碍物（带缓冲区）
+    避障规划：
+    - 直飞最短：无视障碍物，直接直线。
+    - 左侧绕飞：顺时针沿缓冲区边界。
+    - 右侧绕飞：逆时针沿缓冲区边界。
+    - 弧线最短航线：自动选择较短一侧绕行，并生成平滑曲线（终点严格固定）。
     """
     # 直飞最短：完全无视障碍
     if fly_mode == "直飞最短":
         return [start, end]
 
     if not obstacles:
-        # 无障碍时，左右绕飞退化为直线，弧线用贝塞尔
         if fly_mode == "弧线最短航线":
+            # 无障碍时，贝塞尔曲线，控制点为中点
             cx, cy = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
             return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/20 for i in range(21)]]
@@ -52,10 +53,10 @@ def plan_safe_path(start, end, obstacles, fly_mode):
 
     obs = obstacles[0]
     obs_poly = Polygon(obs["points"])
-    buffered_poly = get_obstacle_with_buffer(obs_poly)   # 用于路径规划，但不绘制
+    buffered_poly = get_obstacle_with_buffer(obs_poly)
     direct_line = LineString([start, end])
 
-    # 如果不与缓冲区域相交，则直接连接（弧线模式仍然用贝塞尔）
+    # 如果不与缓冲区相交，则无需绕飞
     if not direct_line.intersects(buffered_poly):
         if fly_mode == "弧线最短航线":
             cx, cy = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
@@ -64,14 +65,12 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         return [start, end]
 
     # --- 需要绕飞 ---
-    # 找到直线与缓冲区的两个交点
     intersection = direct_line.intersection(buffered_poly.boundary)
     if intersection.geom_type == 'MultiPoint':
         pts = list(intersection.geoms)
     else:
         pts = [intersection]
     if len(pts) < 2:
-        # 退化情况，直接返回直线
         return [start, end]
 
     p1, p2 = pts[0], pts[1]
@@ -82,7 +81,6 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     else:
         entry, exit_pt = p2, p1
 
-    # 获取缓冲区域的边界点
     boundary_pts = list(buffered_poly.exterior.coords)
 
     def find_nearest_idx(pt):
@@ -99,59 +97,45 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     x_idx = find_nearest_idx(exit_pt)
     n = len(boundary_pts)
 
-    # ---------- 核心：根据飞行方向判断左右侧 ----------
-    # 计算从起点到终点的方向向量
-    dx = end[0] - start[0]
-    dy = end[1] - start[1]
-    # 障碍物中心点
-    center = obs_poly.centroid
-    # 从起点指向障碍物中心的向量
-    to_center = (center.x - start[0], center.y - start[1])
-    # 叉积：正表示中心在左侧，负表示在右侧
-    cross = dx * to_center[1] - dy * to_center[0]
-    # 左侧绕飞：应该走障碍物左侧的边界（即从入口逆时针绕到出口）
-    # 右侧绕飞：走右侧边界（顺时针）
-    # 注意：boundary_pts 是逆时针顺序，左侧对应逆时针方向，右侧对应顺时针方向
+    # ---------- 修正左右绕飞方向 ----------
     if fly_mode == "左侧绕飞":
-        # 左侧 -> 逆时针（索引递减）
-        direction = -1
-    elif fly_mode == "右侧绕飞":
-        # 右侧 -> 顺时针（索引递增）
+        # 左侧绕飞 = 顺时针（索引递增）
         direction = 1
-    else:  # 弧线最短航线：默认选择较短一边（自动选择左右中较短路径）
-        # 分别计算逆时针和顺时针的长度，取短者
-        len_ccw = (e_idx - x_idx) % n
-        len_cw = (x_idx - e_idx) % n
-        direction = -1 if len_ccw < len_cw else 1
+    elif fly_mode == "右侧绕飞":
+        # 右侧绕飞 = 逆时针（索引递减）
+        direction = -1
+    else:  # 弧线最短航线：自动选择较短一侧绕行
+        len_cw = (x_idx - e_idx) % n       # 顺时针长度
+        len_ccw = (e_idx - x_idx) % n      # 逆时针长度
+        direction = 1 if len_cw <= len_ccw else -1   # 选择较短路径
 
-    # 沿边界收集绕飞点
+    # 收集绕飞路径点
     bypass_pts = []
     i = e_idx
-    if direction == -1:   # 逆时针（索引减小）
-        while i != x_idx:
-            bypass_pts.append(boundary_pts[i])
-            i = (i - 1) % n
-        bypass_pts.append(boundary_pts[x_idx])
-    else:                # 顺时针（索引增大）
+    if direction == 1:   # 顺时针
         while i != x_idx:
             bypass_pts.append(boundary_pts[i])
             i = (i + 1) % n
         bypass_pts.append(boundary_pts[x_idx])
+    else:                # 逆时针
+        while i != x_idx:
+            bypass_pts.append(boundary_pts[i])
+            i = (i - 1) % n
+        bypass_pts.append(boundary_pts[x_idx])
 
-    # 弧线模式：对绕飞路径进行贝塞尔平滑处理（生成光滑曲线）
+    # 弧线模式：对绕飞路径进行平滑，并确保终点为 end
     if fly_mode == "弧线最短航线" and len(bypass_pts) >= 2:
-        # 用绕飞路径点作为控制点生成一条平滑曲线
-        # 简化：对每相邻两段进行一次细分插值，使整体光滑
-        smooth_path = [start]
-        # 将 bypass_pts 作为关键点，使用 Catmull-Rom 插值
-        points = [start] + bypass_pts + [end]
+        # 使用 Catmull-Rom 样条插值，起点 -> 绕飞关键点 -> 终点
+        all_points = [start] + bypass_pts + [end]
         smooth_path = []
-        for i in range(len(points)-1):
-            p0 = points[max(0, i-1)]
-            p1 = points[i]
-            p2 = points[i+1]
-            p3 = points[min(len(points)-1, i+2)]
-            for t in [j/10 for j in range(1, 11)]:   # 每段插10个点
+        # 对每一段进行插值，但保证最后一个点精确为 end
+        for i in range(len(all_points) - 1):
+            p0 = all_points[max(0, i-1)]
+            p1 = all_points[i]
+            p2 = all_points[i+1]
+            p3 = all_points[min(len(all_points)-1, i+2)]
+            # 每段插值 10 个点（不含终点，终点由下一段起点或最后单独添加）
+            for t in [j/10 for j in range(1, 11)]:
                 tt = t
                 x = 0.5 * ((2*p1[0]) +
                            (-p0[0] + p2[0]) * tt +
@@ -162,10 +146,16 @@ def plan_safe_path(start, end, obstacles, fly_mode):
                            (2*p0[1] -5*p1[1] +4*p2[1] - p3[1]) * tt*tt +
                            (-p0[1] +3*p1[1] -3*p2[1] + p3[1]) * tt*tt*tt)
                 smooth_path.append((x, y))
+        # 确保终点精确落在 end
         smooth_path.append(end)
-        return smooth_path
+        # 去重（防止因浮点误差出现重复点）
+        unique_path = []
+        for p in smooth_path:
+            if not unique_path or math.hypot(p[0]-unique_path[-1][0], p[1]-unique_path[-1][1]) > 1e-9:
+                unique_path.append(p)
+        return unique_path
     else:
-        # 左右绕飞：返回折线路径
+        # 左右绕飞模式：返回折线路径
         return [start] + bypass_pts + [end]
 
 # ==================== 地图绘制（不绘制橙色缓冲区） ====================
@@ -384,15 +374,15 @@ if "飞行监控" in st.session_state.page:
             st.line_chart(df, x="时间", y="序号", color="#ff4560")
             st.dataframe(df, use_container_width=True, height=220)
 
-    # 仅当心跳运行时才刷新（并且仅在监控页面，不会影响地图页面）
+    # 仅当心跳运行时才刷新（且仅在监控页面，不会影响地图页面）
     if st.session_state.running:
         time.sleep(0.05)
         st.rerun()
 
 # ==================== 航线规划页面 ====================
 else:
-    st.header("🗺️ 航线规划（方向已修正 | 弧线避障 | 不紧贴障碍物）")
-    st.success("✅ 左侧绕飞/右侧绕飞：根据飞行方向正确选择 | ✅ 弧线最短航线：平滑绕飞 | ✅ 路径与障碍物保持15米缓冲（不显示橙色区域）")
+    st.header("🗺️ 航线规划（方向已修正 | 弧线终点固定 | 不显示安全区）")
+    st.success("✅ 左侧绕飞=顺时针 | 右侧绕飞=逆时针 | 弧线最短航线=自动取短边并平滑，终点精确")
 
     clng, clat = st.session_state.home_point
     map_container = st.empty()
@@ -407,7 +397,7 @@ else:
             st.session_state.coord_system,
             st.session_state.draw_points
         )
-        o = st_folium(m, width=1100, height=680, key="MAP_NO_BUFFER")
+        o = st_folium(m, width=1100, height=680, key="MAP_NO_BUFFER2")
 
     if o and o.get("last_clicked"):
         lat = o["last_clicked"]["lat"]
