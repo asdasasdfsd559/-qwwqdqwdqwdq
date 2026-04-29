@@ -1,10 +1,10 @@
 import streamlit as st
 import pandas as pd
-import threading
-import time
 import json
 import os
 import math
+import time
+import random
 from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
@@ -17,7 +17,7 @@ BEIJING_TZ = timezone(timedelta(hours=8))
 def get_beijing_time_str():
     return datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
 
-# ==================== 辅助函数（您的航线规划逻辑） ====================
+# ==================== 坐标转换 ====================
 class CoordTransform:
     @staticmethod
     def wgs84_to_gcj02(lng, lat):
@@ -26,6 +26,7 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0003
 
+# ========== 安全缓冲区 ==========
 SAFE_BUFFER = 0.00015
 
 def get_obstacle_with_buffer(obs_poly):
@@ -130,7 +131,6 @@ def plan_safe_path(start, end, obstacles, fly_mode, swap_direction):
     x_idx = find_nearest_idx(exit_pt)
     n = len(boundary_pts)
 
-    # 方向定义（支持交换）
     if swap_direction:
         left_dir = -1   # 逆时针
         right_dir = 1   # 顺时针
@@ -241,7 +241,7 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 初始化 session_state ====================
+# ==================== 初始化 ====================
 if "home_point" not in st.session_state:
     loaded = load_state()
     OFFICIAL_LNG = 118.749413
@@ -256,7 +256,7 @@ if "home_point" not in st.session_state:
         "last_click": None,
         "fly_mode": "左侧绕飞",
         "swap_direction": False,
-        "page": "飞行监控"   # 当前页面
+        "page": "飞行监控"
     }
     for k, v in defaults.items():
         if loaded and k in loaded:
@@ -264,16 +264,13 @@ if "home_point" not in st.session_state:
         else:
             st.session_state[k] = v
 
-# ==================== 侧边栏（页面切换 + 参数控制） ====================
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
     st.caption("📍 葛关路625号")
-    
-    # 页面切换（不影响地图闪烁）
     st.session_state.page = st.radio("功能", ["📡 飞行监控", "🗺️ 航线规划"])
-    
-    # 以下控件仅在航线规划页面显示（避免监控页面出现无关控件）
+
     if st.session_state.page == "🗺️ 航线规划":
         st.session_state.coord_system = st.selectbox(
             "坐标系", ["gcj02", "wgs84"],
@@ -286,7 +283,6 @@ with st.sidebar:
             st.session_state.home_point = (hlng, hlat)
             save_state()
             st.rerun()
-
         st.subheader("🚩 降落点")
         llng = st.number_input("降落经度", value=st.session_state.land_point[0], format="%.6f")
         llat = st.number_input("降落纬度", value=st.session_state.land_point[1], format="%.6f")
@@ -294,13 +290,11 @@ with st.sidebar:
             st.session_state.land_point = (llng, llat)
             save_state()
             st.rerun()
-
         st.subheader("🛫 飞行策略")
         st.session_state.fly_mode = st.selectbox(
             "绕飞模式", ["直飞最短", "左侧绕飞", "右侧绕飞", "弧线最短航线"]
         )
         st.session_state.swap_direction = st.checkbox("交换左右方向", value=st.session_state.swap_direction)
-
         st.subheader("✈️ 航线")
         if st.button("生成航线"):
             st.session_state.waypoints = [st.session_state.home_point, st.session_state.land_point]
@@ -310,7 +304,6 @@ with st.sidebar:
             st.session_state.waypoints = []
             save_state()
             st.rerun()
-
         st.subheader("🚧 圈选障碍物")
         st.write(f"已打点：{len(st.session_state.draw_points)}")
         height = st.number_input("高度(m)", 1, 500, 25)
@@ -330,7 +323,6 @@ with st.sidebar:
             st.session_state.draw_points = []
             save_state()
             st.rerun()
-
         st.subheader("📋 已保存障碍物")
         obs_names = [f"{i+1}. {o['name']}" for i, o in enumerate(st.session_state.obstacles)]
         if obs_names:
@@ -345,73 +337,51 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控页面（后台线程心跳，无闪烁） ====================
+# ==================== 飞行监控页面（手动逐条添加心跳） ====================
 if st.session_state.page == "📡 飞行监控":
-    st.header("📡 飞行监控（1秒精准心跳 · 无闪烁）")
+    st.header("📡 飞行监控（手动添加心跳记录 - 地图永不闪烁）")
 
     if "heartbeat_data" not in st.session_state:
         st.session_state.heartbeat_data = []
         st.session_state.seq = 0
-        st.session_state.running = False
-        st.session_state.last_beat_time = time.time()
-
-    # 后台线程函数
-    def heartbeat_worker():
-        while st.session_state.running:
-            now = time.time()
-            if now - st.session_state.last_beat_time >= 1.0:
-                st.session_state.seq += 1
-                t = get_beijing_time_str()
-                st.session_state.heartbeat_data.append({
-                    "序号": st.session_state.seq,
-                    "时间": t,
-                    "状态": "在线正常"
-                })
-                if len(st.session_state.heartbeat_data) > 60:
-                    st.session_state.heartbeat_data.pop(0)
-                st.session_state.last_beat_time = now
-            time.sleep(0.2)
-
-    # 控制线程
-    if "heartbeat_thread" not in st.session_state:
-        st.session_state.heartbeat_thread = None
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("▶️ 开始心跳", use_container_width=True):
-            if not st.session_state.running:
-                st.session_state.running = True
-                st.session_state.last_beat_time = time.time()
-                if st.session_state.heartbeat_thread is None or not st.session_state.heartbeat_thread.is_alive():
-                    st.session_state.heartbeat_thread = threading.Thread(target=heartbeat_worker, daemon=True)
-                    st.session_state.heartbeat_thread.start()
+        if st.button("➕ 添加一条心跳记录", use_container_width=True):
+            st.session_state.seq += 1
+            t = get_beijing_time_str()
+            # 模拟随机传感器数据
+            battery = round(random.uniform(70, 100), 2)
+            signal = round(random.uniform(60, 95), 2)
+            st.session_state.heartbeat_data.append({
+                "序号": st.session_state.seq,
+                "时间": t,
+                "状态": "在线正常",
+                "电池电量(%)": battery,
+                "信号强度(%)": signal,
+                "温度(°C)": round(random.uniform(20, 45), 1),
+                "卫星数": random.randint(6, 12)
+            })
+            if len(st.session_state.heartbeat_data) > 60:
+                st.session_state.heartbeat_data.pop(0)
+            st.rerun()
     with col2:
-        if st.button("⏸️ 暂停心跳", use_container_width=True):
-            st.session_state.running = False
+        if st.button("🗑️ 清空所有记录", use_container_width=True):
+            st.session_state.heartbeat_data = []
+            st.session_state.seq = 0
+            st.rerun()
 
-    # 局部刷新区域（使用 st.empty 循环，不会导致整个页面重绘）
-    placeholder = st.empty()
-    while st.session_state.running:
-        df = pd.DataFrame(st.session_state.heartbeat_data)
-        with placeholder.container():
-            if not df.empty:
-                st.line_chart(df, x="时间", y="序号", color="#ff4560")
-                st.dataframe(df, use_container_width=True, height=220)
-            else:
-                st.info("等待心跳数据...")
-        time.sleep(0.5)  # 每0.5秒刷新一次显示（不是心跳生成间隔）
+    df = pd.DataFrame(st.session_state.heartbeat_data)
+    if not df.empty:
+        st.metric("累计心跳数", len(df))
+        st.line_chart(df, x="时间", y="序号", color="#ff4560")
+        st.dataframe(df, use_container_width=True, height=300)
     else:
-        # 未运行时显示最后一次数据
-        df = pd.DataFrame(st.session_state.heartbeat_data)
-        if not df.empty:
-            st.line_chart(df, x="时间", y="序号", color="#ff4560")
-            st.dataframe(df, use_container_width=True, height=220)
-        else:
-            st.info("点击「开始心跳」查看实时数据")
+        st.info("点击「添加一条心跳记录」开始模拟无人机心跳")
 
-# ==================== 航线规划页面（地图独立，永不闪烁） ====================
+# ==================== 航线规划页面 ====================
 else:
-    st.header("🗺️ 航线规划（地图独立，心跳不影响）")
+    st.header("🗺️ 航线规划（地图永不闪烁）")
     st.success(f"✅ 当前模式：{st.session_state.fly_mode}  |  方向交换：{'是' if st.session_state.swap_direction else '否'}")
 
     clng, clat = st.session_state.home_point
