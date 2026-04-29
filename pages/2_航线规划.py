@@ -244,6 +244,7 @@ if "home_point" not in st.session_state:
         else:
             st.session_state[k] = v
 
+# 侧边栏
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -318,10 +319,11 @@ with st.sidebar:
         save_state()
         st.rerun()
 
+# 地图显示区域
 st.header("🗺️ 航线规划（左侧绕飞=顺时针，右侧绕飞=逆时针）")
 st.success(f"✅ 当前模式：{st.session_state.fly_mode}")
 
-# 获取上次保存的地图视图，如果没有则使用起飞点
+# 获取上次保存的地图视图
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
 
@@ -336,9 +338,10 @@ m = create_map(
     st.session_state.fly_mode,
     zoom
 )
+
 output = st_folium(m, width=1100, height=680, key="main_map")
 
-# 保存当前地图的视图（中心点和缩放级别）
+# 保存当前地图视图（必须在处理打点之前，以便打点后恢复相同视图）
 if output and output.get("center") and output.get("zoom"):
     st.session_state.map_center = (output["center"]["lng"], output["center"]["lat"])
     st.session_state.map_zoom = output["zoom"]
