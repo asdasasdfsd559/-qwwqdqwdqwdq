@@ -17,7 +17,7 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0003
 
-# ==================== 安全缓冲区（仅用于路径计算，不绘制） ====================
+# ==================== 安全缓冲区 ====================
 SAFE_BUFFER = 0.00015   # 约15米
 
 def get_obstacle_with_buffer(obs_poly):
@@ -82,11 +82,14 @@ def arc_smooth(points, num_per_segment=40):
             uniq.append(pt)
     return uniq
 
-# ==================== 核心绕飞规划（带安全缓冲区） ====================
+# ==================== 核心绕飞规划（修复版） ====================
 def plan_safe_path(start, end, obstacles, fly_mode):
     """
     无人机绕飞航线生成（使用安全缓冲区，航线距离障碍物15米）
-    方向：左侧绕飞 = 逆时针，右侧绕飞 = 顺时针
+    方向定义：
+        - 左侧绕飞 = 逆时针（沿缓冲区边界索引递减）
+        - 右侧绕飞 = 顺时针（沿缓冲区边界索引递增）
+        - 弧线最短 = 自动选择较短边
     """
     if fly_mode == "直飞最短":
         return [start, end]
@@ -107,13 +110,14 @@ def plan_safe_path(start, end, obstacles, fly_mode):
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/30 for i in range(31)]]
         return [start, end]
 
-    # 使用第一个障碍物的缓冲区
+    # 获取第一个障碍物的缓冲区多边形（用于路径规划，不显示）
     obs_poly = Polygon(obstacles[0]["points"])
     buffered_poly = get_obstacle_with_buffer(obs_poly)
     direct_line = LineString([start, end])
 
-    # 检测直线是否与缓冲区相交
+    # 1. 检测原始直线是否与缓冲区相交
     if not line_intersects_polygon(direct_line, buffered_poly):
+        # 直线安全，无需绕飞
         if fly_mode == "弧线最短航线":
             cx, cy = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
             dx, dy = end[0] - start[0], end[1] - start[1]
@@ -129,18 +133,15 @@ def plan_safe_path(start, end, obstacles, fly_mode):
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/30 for i in range(31)]]
         return [start, end]
 
-    # 需要绕飞：获取直线与缓冲区边界的两个交点
+    # 2. 需要绕飞：获取直线与缓冲区边界的两个交点
     pts = get_intersection_points(direct_line, buffered_poly.boundary)
     if len(pts) < 2:
         return [start, end]
 
-    # 确定入口（靠近起点）和出口（靠近终点）
+    # 确定入口（离起点近）和出口（离终点近）
     d1 = math.hypot(pts[0].x - start[0], pts[0].y - start[1])
     d2 = math.hypot(pts[1].x - start[0], pts[1].y - start[1])
-    if d1 < d2:
-        entry, exit_pt = pts[0], pts[1]
-    else:
-        entry, exit_pt = pts[1], pts[0]
+    entry, exit_pt = (pts[0], pts[1]) if d1 < d2 else (pts[1], pts[0])
 
     # 获取缓冲区边界点（逆时针顺序）
     boundary_coords = list(buffered_poly.exterior.coords)
@@ -150,40 +151,41 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     x_idx = nearest_boundary_index(exit_pt, boundary_coords)
 
     # 计算顺时针（索引递增）和逆时针（索引递减）的步数
-    cw_steps = (x_idx - e_idx) % n
-    ccw_steps = (e_idx - x_idx) % n
+    cw_steps = (x_idx - e_idx) % n          # 顺时针前进的步数
+    ccw_steps = (e_idx - x_idx) % n         # 逆时针前进的步数
 
-    # 根据模式选择绕行方向（已交换：左侧=逆时针，右侧=顺时针）
+    # 根据模式选择绕行方向（已修正：左侧=逆时针，右侧=顺时针）
     if fly_mode == "左侧绕飞":
-        direction = "counterclockwise"   # 逆时针
+        use_clockwise = False   # 逆时针
     elif fly_mode == "右侧绕飞":
-        direction = "clockwise"          # 顺时针
+        use_clockwise = True    # 顺时针
     else:  # 弧线最短航线
-        direction = "clockwise" if cw_steps <= ccw_steps else "counterclockwise"
+        use_clockwise = cw_steps <= ccw_steps   # 选择步数较少的
 
     # 收集绕飞边界点
     bypass = []
     i = e_idx
-    if direction == "clockwise":
+    if use_clockwise:   # 顺时针（索引递增）
         while i != x_idx:
             bypass.append(boundary_coords[i])
             i = (i + 1) % n
         bypass.append(boundary_coords[x_idx])
-    else:
+    else:               # 逆时针（索引递减）
         while i != x_idx:
             bypass.append(boundary_coords[i])
             i = (i - 1) % n
         bypass.append(boundary_coords[x_idx])
 
-    # 构建核心路径
+    # 构建核心路径（起点 -> 入口 -> 边界点 -> 出口 -> 终点）
     core_path = [start] + bypass + [end]
 
+    # 弧线模式平滑处理
     if fly_mode == "弧线最短航线":
         return arc_smooth(core_path, num_per_segment=40)
     else:
         return core_path
 
-# ==================== 地图绘制（只绘制障碍物，不绘制缓冲区） ====================
+# ==================== 地图绘制 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("map_zoom", 19),
                    control_scale=True, tiles=None)
@@ -360,8 +362,8 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（左右绕飞方向已交换，航线与障碍物保持15米安全距离）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode}")
+st.header("🗺️ 航线规划（已修复穿过障碍物问题）")
+st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米")
 
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
