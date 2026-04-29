@@ -414,7 +414,7 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（全程顺滑弧线版）")
+st.header("🗺️ 航线规划")  # 已删除括号及括号内文字
 # 已删除提示文字行
 
 center = st.session_state.get("map_center", st.session_state.home_point)
