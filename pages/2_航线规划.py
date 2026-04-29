@@ -26,9 +26,9 @@ def get_obstacle_with_buffer(obs_poly):
 
 def get_around_path(start, end, obstacle, fly_mode):
     """
-    核心：生成绕飞路径（已交换左右绕飞方向）
-    - 左侧绕飞：顺时针（原右侧）
-    - 右侧绕飞：逆时针（原左侧）
+    核心：生成绕飞路径（左右绕飞已交换）
+    - 左侧绕飞：顺时针
+    - 右侧绕飞：逆时针
     """
     obs_poly = Polygon(obstacle['points'])
     buffered = get_obstacle_with_buffer(obs_poly)
@@ -40,20 +40,20 @@ def get_around_path(start, end, obstacle, fly_mode):
     start_dist = ring.project(start_pt)
     end_dist = ring.project(end_pt)
     
-    # 采样点数（越多越平滑）
-    num_points = 30  
+    # 优化采样点数，减少冗余
+    num_points = 20  
     path_points = []
     
-    # 交换左右绕飞方向
+    # 交换后的左右绕飞逻辑
     if fly_mode == "左侧绕飞":
-        # 左侧绕飞 → 顺时针（原右侧逻辑）
+        # 左侧绕飞 → 顺时针
         if start_dist > end_dist:
             distances = [start_dist + i*((ring.length - start_dist) + end_dist)/num_points for i in range(num_points+1)]
             distances = [d % ring.length for d in distances]
         else:
             distances = [start_dist + i*(end_dist - start_dist)/num_points for i in range(num_points+1)]
     elif fly_mode == "右侧绕飞":
-        # 右侧绕飞 → 逆时针（原左侧逻辑）
+        # 右侧绕飞 → 逆时针
         if start_dist < end_dist:
             distances = [start_dist - i*(start_dist + (ring.length - end_dist))/num_points for i in range(num_points+1)]
             distances = [d % ring.length for d in distances]
@@ -62,48 +62,71 @@ def get_around_path(start, end, obstacle, fly_mode):
     else:
         return []
     
-    # 生成绕飞点
+    # 生成绕飞点（去重，避免重复点导致路径卡顿）
+    prev_pt = None
     for d in distances:
         p = ring.interpolate(d)
-        path_points.append((p.x, p.y))
+        curr_pt = (p.x, p.y)
+        if prev_pt is None or math.hypot(curr_pt[0]-prev_pt[0], curr_pt[1]-prev_pt[1]) > 1e-8:
+            path_points.append(curr_pt)
+            prev_pt = curr_pt
     
     return path_points
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     """
-    修复后：交换左右绕飞 + 优化弧线弧度/最短路径
+    最终优化：
+    1. 修复弧线最短路径逻辑（真正最短）
+    2. 简化弧线计算，避免过度绕飞
+    3. 保持左右绕飞正确
     """
-    # 无障碍物：直飞/增强弧度的弧线
+    # 无障碍物：直飞/自然弧线
     if not obstacles:
         if fly_mode == "弧线最短航线":
-            # 增大弧线偏移量（弧度更明显）
-            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
-            dx, dy = end[0]-start[0], end[1]-start[1]
-            # 偏移量从0.0003增大到0.0008，弧度更明显
-            perp = (-dy*0.0008, dx*0.0008)  
-            cx += perp[0]
-            cy += perp[1]
-            # 增加采样点（30→50），弧线更顺滑
-            return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
-                     (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/50 for i in range(51)]]
+            # 生成自然、短弧度的贝塞尔曲线（真正最短弧线）
+            # 计算中点偏移（小幅度，保证最短且有弧线）
+            mid_x, mid_y = (start[0]+end[0])/2, (start[1]+end[1])/2
+            # 偏移方向垂直于起点-终点连线，偏移量更小（保证最短）
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            perp_x = -dy * 0.0004  # 减小偏移量，保证弧线最短
+            perp_y = dx * 0.0004
+            ctrl_x = mid_x + perp_x
+            ctrl_y = mid_y + perp_y
+            
+            # 生成贝塞尔曲线点（采样30个，平衡顺滑和最短）
+            bezier_points = []
+            for t in [i/30 for i in range(31)]:
+                x = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
+                y = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl_y + t**2 * end[1]
+                bezier_points.append((x, y))
+            return bezier_points
         return [start, end]
     
     # 有障碍物：取第一个障碍物
     obstacle = obstacles[0]
     obs_poly = Polygon(obstacle['points'])
+    buffered = get_obstacle_with_buffer(obs_poly)
     direct_line = LineString([start, end])
     
     # 检测是否需要绕飞
-    if not direct_line.intersects(get_obstacle_with_buffer(obs_poly)):
+    if not direct_line.intersects(buffered):
+        # 直线不穿过障碍物，直接生成短弧线
         if fly_mode == "弧线最短航线":
-            # 无障碍时增大弧线弧度
-            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
-            dx, dy = end[0]-start[0], end[1]-start[1]
-            perp = (-dy*0.0008, dx*0.0008)
-            cx += perp[0]
-            cy += perp[1]
-            return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
-                     (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/50 for i in range(51)]]
+            mid_x, mid_y = (start[0]+end[0])/2, (start[1]+end[1])/2
+            dx = end[0] - start[0]
+            dy = end[1] - start[1]
+            perp_x = -dy * 0.0004
+            perp_y = dx * 0.0004
+            ctrl_x = mid_x + perp_x
+            ctrl_y = mid_y + perp_y
+            
+            bezier_points = []
+            for t in [i/30 for i in range(31)]:
+                x = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
+                y = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl_y + t**2 * end[1]
+                bezier_points.append((x, y))
+            return bezier_points
         return [start, end]
     
     # 需要绕飞
@@ -112,66 +135,60 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         full_path = [start] + around_points + [end]
         return full_path
     elif fly_mode == "弧线最短航线":
-        # 优化最短路径计算：精确计算绕飞总长度（含起点+终点）
-        def calc_total_path_length(base_start, base_end, around_points):
-            """计算完整路径长度（起点→绕飞点→终点）"""
-            length = math.hypot(around_points[0][0]-base_start[0], around_points[0][1]-base_start[1])
-            for i in range(1, len(around_points)):
-                length += math.hypot(around_points[i][0]-around_points[i-1][0], around_points[i][1]-around_points[i-1][1])
-            length += math.hypot(base_end[0]-around_points[-1][0], base_end[1]-around_points[-1][1])
+        # 核心修复：精准计算最短绕飞路径
+        def calc_path_length(points):
+            """计算路径总长度"""
+            length = 0
+            for i in range(1, len(points)):
+                length += math.hypot(points[i][0]-points[i-1][0], points[i][1]-points[i-1][1])
             return length
         
-        # 生成左右绕飞路径
+        # 生成左右绕飞的完整路径
         left_around = get_around_path(start, end, obstacle, "左侧绕飞")
         right_around = get_around_path(start, end, obstacle, "右侧绕飞")
         
-        # 计算真实总长度
-        left_total_len = calc_total_path_length(start, end, left_around)
-        right_total_len = calc_total_path_length(start, end, right_around)
+        left_full = [start] + left_around + [end]
+        right_full = [start] + right_around + [end]
         
-        # 选更短的路径
-        around_points = left_around if left_total_len < right_total_len else right_around
-        full_path = [start] + around_points + [end]
+        # 计算真实长度，选更短的
+        left_len = calc_path_length(left_full)
+        right_len = calc_path_length(right_full)
+        shortest_around = left_around if left_len < right_len else right_around
         
-        # 增强弧线平滑度 + 增大弧度
-        def enhanced_catmull_rom(points, num_segments=30):
-            """增强版样条插值，弧度更明显"""
+        # 生成短弧线（基于最短绕飞路径，平滑但不额外增加长度）
+        def smooth_short_path(points, num_segments=15):
+            """轻量级平滑，保证最短"""
             if len(points) < 3:
                 return points
             smooth = []
-            # 手动增加中间点的偏移，强化弧度
-            mid_idx = len(points) // 2
-            mid_pt = points[mid_idx]
-            dx = mid_pt[0] - (points[0][0]+points[-1][0])/2
-            dy = mid_pt[1] - (points[0][1]+points[-1][1])/2
-            # 偏移放大系数
-            amplify = 1.5  
-            adjusted_points = []
-            for i, p in enumerate(points):
-                if i == mid_idx:
-                    adjusted_points.append((p[0]+dx*amplify, p[1]+dy*amplify))
-                else:
-                    adjusted_points.append(p)
-            
-            # 样条插值
-            for i in range(len(adjusted_points)-1):
-                p0 = adjusted_points[max(0, i-1)]
-                p1 = adjusted_points[i]
-                p2 = adjusted_points[i+1]
-                p3 = adjusted_points[min(len(adjusted_points)-1, i+2)]
+            for i in range(len(points)-1):
+                p0 = points[max(0, i-1)]
+                p1 = points[i]
+                p2 = points[i+1]
+                p3 = points[min(len(points)-1, i+2)]
+                # 减少插值点，避免过度平滑导致路径变长
                 for t in [j/num_segments for j in range(num_segments+1)]:
                     t2 = t*t
                     t3 = t2*t
                     x = 0.5 * (2*p1[0] + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
                     y = 0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
                     smooth.append((x, y))
-            return smooth
+            # 去重
+            uniq = []
+            prev = None
+            for p in smooth:
+                if prev is None or math.hypot(p[0]-prev[0], p[1]-prev[1]) > 1e-8:
+                    uniq.append(p)
+                    prev = p
+            return uniq
         
-        return enhanced_catmull_rom(full_path)
+        # 完整最短弧线路径
+        core_path = [start] + shortest_around + [end]
+        return smooth_short_path(core_path)
     else:
         return [start, end]
 
-# ==================== 地图绘制 ====================
+# ==================== 地图绘制（移除安全缓冲区显示） ====================
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("map_zoom", 19),
                    control_scale=True, tiles=None)
@@ -192,23 +209,13 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         l_lng, l_lat = land_point if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker([l_lat, l_lng], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
-    # 绘制障碍物+安全缓冲区
+    # 仅绘制障碍物本体（移除安全缓冲区显示）
     for ob in obstacles:
         ps = []
         for p in ob['points']:
             plng, plat = p if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*p)
             ps.append([plat, plng])
-        # 障碍物本体
         folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.5, popup=f"{ob['name']}").add_to(m)
-        # 安全缓冲区
-        obs_poly = Polygon(ob['points'])
-        buffered = get_obstacle_with_buffer(obs_poly)
-        buffer_ps = []
-        for lng, lat in buffered.exterior.coords:
-            if coord_system != 'gcj02':
-                lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
-            buffer_ps.append([lat, lng])
-        folium.Polygon(locations=buffer_ps, color='orange', fill=True, fill_opacity=0.1, weight=2, popup="安全缓冲区").add_to(m)
 
     if len(waypoints) >= 2:
         safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode)
@@ -357,8 +364,8 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（最终版：交换左右+增强弧线）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米 | 弧线弧度已增强")
+st.header("🗺️ 航线规划（最终优化版）")
+st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米")
 
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
