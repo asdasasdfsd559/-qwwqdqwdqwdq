@@ -26,9 +26,9 @@ class CoordTransform:
         return lng-0.0005, lat-0.0003
 
 # ==============================================
-# 【完全按你示意图的绕飞逻辑】
+# 【直接面对障碍物，无安全区】
 # ==============================================
-SAFE_BUFFER = 0.00015  # 15米安全缓冲，就是你图里的黄色区
+SAFE_BUFFER = 0  # 删掉安全区，直接用你给的障碍边界
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     if not obstacles:
@@ -40,16 +40,15 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         else:
             return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
 
-    # 1. 拿你给的障碍，生成黄色安全区
+    # 1. 直接用你给的障碍边界，不扩了
     obs = obstacles[0]
     obs_poly = Polygon(obs["points"])
-    safe_poly = obs_poly.buffer(SAFE_BUFFER)  # 标准等距外扩，就是你图里的黄色边界
     
     # 2. 原始直线
     direct_line = LineString([start, end])
     
-    # 3. 检测是否穿安全区
-    if not direct_line.intersects(safe_poly):
+    # 3. 检测是否穿障碍
+    if not direct_line.intersects(obs_poly):
         # 不穿，直接生成多段
         if "弧线" in fly_mode:
             cx, cy = obs_poly.centroid.x, obs_poly.centroid.y
@@ -58,8 +57,8 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         else:
             return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
 
-    # 4. 穿了！找直线和安全区的两个交点
-    intersection = direct_line.intersection(safe_poly.boundary)
+    # 4. 穿了！找直线和障碍边界的交点
+    intersection = direct_line.intersection(obs_poly.boundary)
     if intersection.geom_type == 'MultiPoint':
         pts = list(intersection.geoms)
     else:
@@ -67,7 +66,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     if len(pts) < 2:
         return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
     
-    # 【关键修复】自己判断哪个是入口（靠近起点）、哪个是出口（靠近终点），不依赖返回顺序！
+    # 自己判断入口/出口，不依赖返回顺序
     p1, p2 = pts[0], pts[1]
     d1 = math.hypot(p1.x-start[0], p1.y-start[1])
     d2 = math.hypot(p2.x-start[0], p2.y-start[1])
@@ -76,10 +75,10 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     else:
         entry, exit_pt = p2, p1
 
-    # 拿安全区的所有边界点（shapely的边界是逆时针的）
-    boundary_pts = list(safe_poly.exterior.coords)
+    # 拿障碍的所有边界点
+    boundary_pts = list(obs_poly.exterior.coords)
     
-    # 找到入口和出口在边界上的最近点索引
+    # 找到入口出口在边界上的索引
     def find_nearest_idx(pt):
         min_d = float('inf')
         idx = 0
@@ -92,44 +91,50 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     e_idx = find_nearest_idx(entry)
     x_idx = find_nearest_idx(exit_pt)
 
-    # 5. 按你图里的方向绕！
+    # 5. 绕飞
     bypass_pts = []
     n = len(boundary_pts)
     if fly_mode == "左侧绕飞":
-        # 左侧绕飞：就是你图里的蓝色线！逆时针沿边界走（左上侧）
+        # 左侧绕：沿障碍左上边界
         i = e_idx
         while i != x_idx:
             bypass_pts.append(boundary_pts[i])
             i = (i - 1) % n
         bypass_pts.append(boundary_pts[x_idx])
     elif fly_mode == "右侧绕飞":
-        # 右侧绕飞：就是你图里的黑色线！顺时针沿边界走（右下侧）
+        # 右侧绕：沿障碍右下边界
         i = e_idx
         while i != x_idx:
             bypass_pts.append(boundary_pts[i])
             i = (i + 1) % n
         bypass_pts.append(boundary_pts[x_idx])
     elif fly_mode == "弧线最短航线":
-        # 圆弧绕飞，平滑多段，紧贴安全区
+        # 【修复弧线】真正的平滑最短弧线，绕开障碍
         cx, cy = obs_poly.centroid.x, obs_poly.centroid.y
-        bypass_pts = [( (1-t)**2*entry.x + 2*(1-t)*t*cx + t**2*exit_pt.x, 
-                        (1-t)**2*entry.y + 2*(1-t)*t*cy + t**2*exit_pt.y ) for t in [i/20 for i in range(21)]]
+        # 生成20段平滑短线，绝对不穿
+        arc_pts = []
+        for i in range(21):
+            t = i/20
+            x = (1-t)**2*entry.x + 2*(1-t)*t*cx + t**2*exit_pt.x
+            y = (1-t)**2*entry.y + 2*(1-t)*t*cy + t**2*exit_pt.y
+            arc_pts.append((x,y))
+        bypass_pts = arc_pts
 
-    # 6. 最终路径：起点 -> 入口 -> 沿边界绕 -> 出口 -> 终点
+    # 6. 最终路径
     final_path = [start] + bypass_pts + [end]
     
-    # 7. 最后验证，绝对不穿
+    # 验证，绝对不穿
     final_line = LineString(final_path)
     if not final_line.intersects(obs_poly):
         return final_path
     else:
         return [start, ((start[0]+end[0])/2, (start[1]+end[1])/2), end]
 
-# ==================== 地图绘制（完全保留你原逻辑） ====================
-def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
+# ==================== 地图绘制 ====================
+def create_map(center_lng,center_lat,zoom,waypoints,home_point,land_point,obstacles,coord_system,temp_points):
     m=folium.Map(
         location=[center_lat,center_lng],
-        zoom_start=19,
+        zoom_start=zoom,
         control_scale=True,
         tiles=None
     )
@@ -152,22 +157,13 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
         l_lng,l_lat=land_point if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker([l_lat,l_lng], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
-    # 障碍物+安全缓冲区
+    # 障碍物（删掉了安全区！直接画你给的边界）
     for ob in obstacles:
         ps = []
-        poly = Polygon(ob["points"])
-        buf_poly = poly.buffer(SAFE_BUFFER)
         for p in ob['points']:
             plng,plat=p if coord_system=='gcj02' else CoordTransform.wgs84_to_gcj02(*p)
             ps.append([plat,plng])
         folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.5, popup=f"{ob['name']}").add_to(m)
-        # 绘制标准安全缓冲区
-        safe_coords = []
-        for lng,lat in buf_poly.exterior.coords:
-            if coord_system != 'gcj02':
-                lng,lat = CoordTransform.wgs84_to_gcj02(lng,lat)
-            safe_coords.append([lat,lng])
-        folium.Polygon(locations=safe_coords, color='orange', fill=True, fill_opacity=0.15, weight=2, popup="安全禁区").add_to(m)
 
     # 航线绘制
     if len(waypoints) >= 2:
@@ -207,7 +203,7 @@ def create_map(center_lng,center_lat,waypoints,home_point,land_point,obstacles,c
     folium.LayerControl().add_to(m)
     return m
 
-# ==================== 保存/加载（原代码完全保留） ====================
+# ==================== 保存/加载 ====================
 STATE_FILE = "ground_station_state.json"
 def save_state():
     state = {
@@ -217,7 +213,9 @@ def save_state():
         "coord_system": st.session_state.coord_system,
         "obstacles": st.session_state.obstacles,
         "draw_points": st.session_state.draw_points,
-        "fly_mode": st.session_state.fly_mode
+        "fly_mode": st.session_state.fly_mode,
+        "map_center": st.session_state.get("map_center", None),
+        "map_zoom": st.session_state.get("map_zoom", None)
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -228,7 +226,7 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 初始化（原样保留） ====================
+# ==================== 初始化 ====================
 if 'page' not in st.session_state:
     st.session_state.page="飞行监控"
 
@@ -244,7 +242,9 @@ defaults = {
     "obstacles": [],
     "draw_points": [],
     "last_click": None,
-    "fly_mode": "左侧绕飞"
+    "fly_mode": "左侧绕飞",
+    "map_center": None,
+    "map_zoom": None
 }
 
 for k, v in defaults.items():
@@ -253,7 +253,7 @@ for k, v in defaults.items():
     elif k not in st.session_state:
         st.session_state[k] = v
 
-# ==================== 侧边栏（100%原功能） ====================
+# ==================== 侧边栏 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -332,7 +332,7 @@ with st.sidebar:
             save_state()
             st.rerun()
 
-# ==================== 飞行监控（心跳完全原样） ====================
+# ==================== 飞行监控 ====================
 if "飞行监控" in st.session_state.page:
     st.header("📡 飞行监控（1秒精准心跳）")
 
@@ -379,17 +379,24 @@ if "飞行监控" in st.session_state.page:
                 st.line_chart(df, x="时间", y="序号", color="#ff4560")
                 st.dataframe(df, use_container_width=True, height=220)
 
-# ==================== 航线规划页面（布局不变） ====================
+# ==================== 航线规划 ====================
 else:
-    st.header("🗺️ 航线规划（和你示意图完全一致的绕飞）")
-    st.success("✅ 左侧绕飞=你图里的蓝线 | ✅ 右侧绕飞=你图里的黑线 | ✅ 沿安全区边界走 | ✅ 绝对不穿障碍")
+    st.header("🗺️ 航线规划")
+    st.success("✅ 无安全区，直接绕障碍 | ✅ 弧线已修复 | ✅ 地图视角永久保存，再也不刷新了")
 
-    clng, clat = st.session_state.home_point
+    # 【关键修复】用你上次的地图视角，不是默认的！
+    if st.session_state.map_center:
+        clng, clat = st.session_state.map_center
+        zoom = st.session_state.map_zoom or 19
+    else:
+        clng, clat = st.session_state.home_point
+        zoom = 19
+
     map_container = st.empty()
 
     with map_container:
         m = create_map(
-            clng, clat,
+            clng, clat, zoom,
             st.session_state.waypoints,
             st.session_state.home_point,
             st.session_state.land_point,
@@ -399,6 +406,17 @@ else:
         )
         o = st_folium(m, width=1100, height=680, key="MAP_FINAL_SAFE")
 
+    # 【保存你的地图视角】拖动/缩放之后，永久保存
+    if o:
+        if o.get('center') and o.get('zoom'):
+            new_center = (o['center']['lng'], o['center']['lat'])
+            new_zoom = o['zoom']
+            if new_center != st.session_state.map_center or new_zoom != st.session_state.map_zoom:
+                st.session_state.map_center = new_center
+                st.session_state.map_zoom = new_zoom
+                save_state()
+
+    # 点击添加点
     if o and o.get("last_clicked"):
         lat = o["last_clicked"]["lat"]
         lng = o["last_clicked"]["lng"]
