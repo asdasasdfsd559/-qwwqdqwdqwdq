@@ -23,13 +23,8 @@ SAFE_BUFFER = 0.00015   # 约15米
 def get_obstacle_with_buffer(obs_poly):
     return obs_poly.buffer(SAFE_BUFFER)
 
-# ==================== 几何辅助函数 ====================
-def line_intersects_polygon(line, poly):
-    """线段是否与多边形相交（包含边界接触）"""
-    return line.intersects(poly)
-
 def get_intersection_points(line, boundary):
-    """获取线段与多边形边界的所有交点"""
+    """返回线段与多边形边界的所有交点（Point）"""
     inter = line.intersection(boundary)
     if inter.is_empty:
         return []
@@ -38,22 +33,23 @@ def get_intersection_points(line, boundary):
     if inter.geom_type == 'MultiPoint':
         return list(inter.geoms)
     if inter.geom_type == 'LineString':
+        # 理论上直线与凸多边形边界相交应为两点，若为线则取端点
         return [Point(inter.coords[0]), Point(inter.coords[-1])]
     return []
 
-def nearest_boundary_index(point, coords):
-    """找到多边形边界上离给定点最近的点索引"""
+def nearest_index_on_boundary(pt, coords):
+    """返回多边形边界上离 pt 最近的顶点索引"""
     min_dist = float('inf')
     idx = 0
     for i, (x, y) in enumerate(coords):
-        d = math.hypot(x - point.x, y - point.y)
+        d = math.hypot(x - pt.x, y - pt.y)
         if d < min_dist:
             min_dist = d
             idx = i
     return idx
 
-def arc_smooth(points, num_per_segment=40):
-    """Catmull-Rom 样条插值，生成密集的多段线（模拟圆弧）"""
+def catmull_rom_spline(points, num_segments=40):
+    """Catmull-Rom 样条插值，返回多段线点列表"""
     if len(points) < 2:
         return points
     smooth = []
@@ -62,9 +58,9 @@ def arc_smooth(points, num_per_segment=40):
         p1 = points[i]
         p2 = points[i+1]
         p3 = points[min(len(points)-1, i+2)]
-        for t in [j / num_per_segment for j in range(1, num_per_segment+1)]:
-            t2 = t * t
-            t3 = t2 * t
+        for t in [j/num_segments for j in range(1, num_segments+1)]:
+            t2 = t*t
+            t3 = t2*t
             x = 0.5 * ((2 * p1[0]) +
                        (-p0[0] + p2[0]) * t +
                        (2*p0[0] - 5*p1[0] + 4*p2[0] - p3[0]) * t2 +
@@ -75,67 +71,66 @@ def arc_smooth(points, num_per_segment=40):
                        (-p0[1] + 3*p1[1] - 3*p2[1] + p3[1]) * t3)
             smooth.append((x, y))
     smooth.append(points[-1])
-    # 去重
+    # 去除重复点
     uniq = []
-    for pt in smooth:
-        if not uniq or math.hypot(pt[0]-uniq[-1][0], pt[1]-uniq[-1][1]) > 1e-9:
-            uniq.append(pt)
+    for p in smooth:
+        if not uniq or math.hypot(p[0]-uniq[-1][0], p[1]-uniq[-1][1]) > 1e-9:
+            uniq.append(p)
     return uniq
 
-# ==================== 核心绕飞规划（修复版） ====================
 def plan_safe_path(start, end, obstacles, fly_mode):
     """
-    无人机绕飞航线生成（使用安全缓冲区，航线距离障碍物15米）
+    核心绕飞算法
     方向定义：
-        - 左侧绕飞 = 逆时针（沿缓冲区边界索引递减）
-        - 右侧绕飞 = 顺时针（沿缓冲区边界索引递增）
-        - 弧线最短 = 自动选择较短边
+       左侧绕飞 = 逆时针（索引递减）
+       右侧绕飞 = 顺时针（索引递增）
+       弧线最短 = 自动选较短侧并平滑
     """
     if fly_mode == "直飞最短":
         return [start, end]
 
     if not obstacles:
+        # 无障碍，如果是弧线模式则生成贝塞尔曲线（仅美观）
         if fly_mode == "弧线最短航线":
-            cx, cy = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
-            dx, dy = end[0] - start[0], end[1] - start[1]
-            perp_x, perp_y = -dy, dx
-            length = math.hypot(perp_x, perp_y)
+            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
+            dx, dy = end[0]-start[0], end[1]-start[1]
+            perp = (-dy, dx)
+            length = math.hypot(*perp)
             if length > 0:
-                perp_x /= length
-                perp_y /= length
+                perp = (perp[0]/length, perp[1]/length)
             offset = 0.0002
-            cx += perp_x * offset
-            cy += perp_y * offset
+            cx += perp[0]*offset
+            cy += perp[1]*offset
             return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/30 for i in range(31)]]
         return [start, end]
 
-    # 获取第一个障碍物的缓冲区多边形（用于路径规划，不显示）
-    obs_poly = Polygon(obstacles[0]["points"])
-    buffered_poly = get_obstacle_with_buffer(obs_poly)
-    direct_line = LineString([start, end])
+    # 取第一个障碍物（简化，可扩展）
+    obs_poly = Polygon(obstacles[0]['points'])
+    buffered = get_obstacle_with_buffer(obs_poly)   # 缓冲区多边形
+    direct = LineString([start, end])
 
-    # 1. 检测原始直线是否与缓冲区相交
-    if not line_intersects_polygon(direct_line, buffered_poly):
-        # 直线安全，无需绕飞
+    # 检测直线是否与缓冲区相交
+    if not direct.intersects(buffered):
+        # 直线安全
         if fly_mode == "弧线最短航线":
-            cx, cy = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
-            dx, dy = end[0] - start[0], end[1] - start[1]
-            perp_x, perp_y = -dy, dx
-            length = math.hypot(perp_x, perp_y)
+            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
+            dx, dy = end[0]-start[0], end[1]-start[1]
+            perp = (-dy, dx)
+            length = math.hypot(*perp)
             if length > 0:
-                perp_x /= length
-                perp_y /= length
+                perp = (perp[0]/length, perp[1]/length)
             offset = 0.0002
-            cx += perp_x * offset
-            cy += perp_y * offset
+            cx += perp[0]*offset
+            cy += perp[1]*offset
             return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/30 for i in range(31)]]
         return [start, end]
 
-    # 2. 需要绕飞：获取直线与缓冲区边界的两个交点
-    pts = get_intersection_points(direct_line, buffered_poly.boundary)
+    # 需要绕飞：获取直线与缓冲区边界的交点
+    pts = get_intersection_points(direct, buffered.boundary)
     if len(pts) < 2:
+        # 异常情况，返回直线
         return [start, end]
 
     # 确定入口（离起点近）和出口（离终点近）
@@ -144,44 +139,46 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     entry, exit_pt = (pts[0], pts[1]) if d1 < d2 else (pts[1], pts[0])
 
     # 获取缓冲区边界点（逆时针顺序）
-    boundary_coords = list(buffered_poly.exterior.coords)
+    boundary_coords = list(buffered.exterior.coords)
     n = len(boundary_coords)
 
-    e_idx = nearest_boundary_index(entry, boundary_coords)
-    x_idx = nearest_boundary_index(exit_pt, boundary_coords)
+    e_idx = nearest_index_on_boundary(entry, boundary_coords)
+    x_idx = nearest_index_on_boundary(exit_pt, boundary_coords)
 
-    # 计算顺时针（索引递增）和逆时针（索引递减）的步数
-    cw_steps = (x_idx - e_idx) % n          # 顺时针前进的步数
-    ccw_steps = (e_idx - x_idx) % n         # 逆时针前进的步数
+    # 计算顺时针步数（索引递增）和逆时针步数（索引递减）
+    cw_steps = (x_idx - e_idx) % n
+    ccw_steps = (e_idx - x_idx) % n
 
-    # 根据模式选择绕行方向（已修正：左侧=逆时针，右侧=顺时针）
+    # 根据模式选择方向（左侧绕飞 = 逆时针，右侧绕飞 = 顺时针）
     if fly_mode == "左侧绕飞":
-        use_clockwise = False   # 逆时针
+        use_clockwise = False        # 逆时针
     elif fly_mode == "右侧绕飞":
-        use_clockwise = True    # 顺时针
-    else:  # 弧线最短航线
-        use_clockwise = cw_steps <= ccw_steps   # 选择步数较少的
+        use_clockwise = True         # 顺时针
+    else:  # 弧线最短
+        use_clockwise = cw_steps <= ccw_steps
 
-    # 收集绕飞边界点
+    # 收集绕飞边界点（入口 -> 出口沿选定方向）
     bypass = []
     i = e_idx
-    if use_clockwise:   # 顺时针（索引递增）
+    if use_clockwise:
+        # 顺时针（索引递增）
         while i != x_idx:
             bypass.append(boundary_coords[i])
             i = (i + 1) % n
         bypass.append(boundary_coords[x_idx])
-    else:               # 逆时针（索引递减）
+    else:
+        # 逆时针（索引递减）
         while i != x_idx:
             bypass.append(boundary_coords[i])
             i = (i - 1) % n
         bypass.append(boundary_coords[x_idx])
 
-    # 构建核心路径（起点 -> 入口 -> 边界点 -> 出口 -> 终点）
+    # 完整路径
     core_path = [start] + bypass + [end]
 
-    # 弧线模式平滑处理
+    # 如果是弧线模式，进行样条平滑（仍为多段线）
     if fly_mode == "弧线最短航线":
-        return arc_smooth(core_path, num_per_segment=40)
+        return catmull_rom_spline(core_path, num_segments=40)
     else:
         return core_path
 
@@ -227,7 +224,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
             "右侧绕飞": "#000000",
             "弧线最短航线": "#F79E02"
         }.get(fly_mode, "blue")
-
         folium.PolyLine(route, color=color, weight=5, opacity=1, popup="无人机航线").add_to(m)
 
     if len(temp_points) >= 3:
@@ -265,8 +261,7 @@ def load_state():
 # ==================== 初始化 ====================
 if "home_point" not in st.session_state:
     loaded = load_state()
-    OFFICIAL_LNG = 118.749413
-    OFFICIAL_LAT = 32.234097
+    OFFICIAL_LNG, OFFICIAL_LAT = 118.749413, 32.234097
     defaults = {
         "home_point": (OFFICIAL_LNG, OFFICIAL_LAT),
         "land_point": (OFFICIAL_LNG + 0.0008, OFFICIAL_LAT + 0.0005),
@@ -362,8 +357,8 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（已修复穿过障碍物问题）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米")
+st.header("🗺️ 航线规划（已修复方向与穿模问题）")
+st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米（不绘制缓冲区）")
 
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
