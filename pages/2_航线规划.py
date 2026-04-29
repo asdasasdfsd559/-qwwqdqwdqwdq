@@ -46,10 +46,9 @@ def smooth_curve(points, num_per_segment=30, offset_factor=0.3):
     smooth.append(points[-1])
     return smooth
 
-def plan_safe_path(start, end, obstacles, fly_mode):
+def plan_safe_path(start, end, obstacles, fly_mode, swap_direction):
     if fly_mode == "直飞最短":
         return [start, end]
-
     if not obstacles:
         if fly_mode == "弧线最短航线":
             cx, cy = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
@@ -65,12 +64,10 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/30 for i in range(31)]]
         return [start, end]
-
     obs = obstacles[0]
     obs_poly = Polygon(obs["points"])
     buffered_poly = get_obstacle_with_buffer(obs_poly)
     direct_line = LineString([start, end])
-
     if not direct_line.intersects(buffered_poly):
         if fly_mode == "弧线最短航线":
             cx, cy = (start[0] + end[0]) / 2, (start[1] + end[1]) / 2
@@ -86,7 +83,6 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
                      (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/30 for i in range(31)]]
         return [start, end]
-
     intersection = direct_line.intersection(buffered_poly.boundary)
     if intersection.geom_type == 'MultiPoint':
         pts = list(intersection.geoms)
@@ -94,7 +90,6 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         pts = [intersection]
     if len(pts) < 2:
         return [start, end]
-
     p1, p2 = pts[0], pts[1]
     d1 = math.hypot(p1.x - start[0], p1.y - start[1])
     d2 = math.hypot(p2.x - start[0], p2.y - start[1])
@@ -102,9 +97,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         entry, exit_pt = p1, p2
     else:
         entry, exit_pt = p2, p1
-
     boundary_pts = list(buffered_poly.exterior.coords)
-
     def find_nearest_idx(pt):
         min_d = float('inf')
         idx = 0
@@ -114,20 +107,23 @@ def plan_safe_path(start, end, obstacles, fly_mode):
                 min_d = d
                 idx = i
         return idx
-
     e_idx = find_nearest_idx(entry)
     x_idx = find_nearest_idx(exit_pt)
     n = len(boundary_pts)
-
+    if swap_direction:
+        left_dir = -1
+        right_dir = 1
+    else:
+        left_dir = 1
+        right_dir = -1
     if fly_mode == "左侧绕飞":
-        direction = 1
+        direction = left_dir
     elif fly_mode == "右侧绕飞":
-        direction = -1
+        direction = right_dir
     else:
         len_cw = (x_idx - e_idx) % n
         len_ccw = (e_idx - x_idx) % n
         direction = 1 if len_cw <= len_ccw else -1
-
     bypass_pts = []
     i = e_idx
     if direction == 1:
@@ -140,7 +136,6 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             bypass_pts.append(boundary_pts[i])
             i = (i - 1) % n
         bypass_pts.append(boundary_pts[x_idx])
-
     if fly_mode == "弧线最短航线":
         full_path = [start] + bypass_pts + [end]
         smoothed = smooth_curve(full_path, num_per_segment=30, offset_factor=0.2)
@@ -148,55 +143,36 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     else:
         return [start] + bypass_pts + [end]
 
-def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode, map_zoom):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=map_zoom if map_zoom else 19, control_scale=True, tiles=None)
-
-    folium.TileLayer(
-        tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-        attr='高德-街道', name='街道图'
-    ).add_to(m)
-    folium.TileLayer(
-        tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-        attr='高德-卫星', name='卫星图'
-    ).add_to(m)
-
+def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode, swap_direction):
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=19, control_scale=True, tiles=None)
+    folium.TileLayer(tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', attr='高德-街道', name='街道图').add_to(m)
+    folium.TileLayer(tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}', attr='高德-卫星', name='卫星图').add_to(m)
     if home_point:
         h_lng, h_lat = home_point if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*home_point)
         folium.Marker([h_lat, h_lng], icon=folium.Icon(color='green', icon='home'), popup="起飞点").add_to(m)
     if land_point:
         l_lng, l_lat = land_point if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker([l_lat, l_lng], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
-
     for ob in obstacles:
         ps = []
         for p in ob['points']:
             plng, plat = p if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*p)
             ps.append([plat, plng])
         folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.5, popup=f"{ob['name']}").add_to(m)
-
     if len(waypoints) >= 2:
-        safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode)
+        safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode, swap_direction)
         route = []
         for lng, lat in safe_path:
             if coord_system != 'gcj02':
                 lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
             route.append([lat, lng])
-
-        color = {
-            "直飞最短": "blue",
-            "左侧绕飞": "#0066cc",
-            "右侧绕飞": "#000000",
-            "弧线最短航线": "#F79E02"
-        }.get(fly_mode, "blue")
-
+        color = {"直飞最短": "blue", "左侧绕飞": "#0066cc", "右侧绕飞": "#000000", "弧线最短航线": "#F79E02"}.get(fly_mode, "blue")
         folium.PolyLine(route, color=color, weight=5, opacity=1, popup="无人机航线").add_to(m)
-
     if len(temp_points) >= 3:
         ps = [[lat, lng] for lng, lat in temp_points]
         folium.Polygon(locations=ps, color='red', weight=2).add_to(m)
     for lng, lat in temp_points:
         folium.CircleMarker([lat, lng], radius=4, color='red', fill=True).add_to(m)
-
     folium.LayerControl().add_to(m)
     return m
 
@@ -210,8 +186,7 @@ def save_state():
         "obstacles": st.session_state.obstacles,
         "draw_points": st.session_state.draw_points,
         "fly_mode": st.session_state.fly_mode,
-        "map_zoom": st.session_state.get("map_zoom", 19),
-        "map_center": st.session_state.get("map_center", st.session_state.home_point)
+        "swap_direction": st.session_state.swap_direction
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
@@ -235,8 +210,7 @@ if "home_point" not in st.session_state:
         "draw_points": [],
         "last_click": None,
         "fly_mode": "左侧绕飞",
-        "map_zoom": 19,
-        "map_center": (OFFICIAL_LNG, OFFICIAL_LAT)
+        "swap_direction": False
     }
     for k, v in defaults.items():
         if loaded and k in loaded:
@@ -244,16 +218,11 @@ if "home_point" not in st.session_state:
         else:
             st.session_state[k] = v
 
-# 侧边栏
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
     st.caption("📍 葛关路625号")
-
-    st.session_state.coord_system = st.selectbox(
-        "坐标系", ["gcj02", "wgs84"],
-        format_func=lambda x: "GCJ02(国内)" if x == "gcj02" else "WGS84(GPS)"
-    )
+    st.session_state.coord_system = st.selectbox("坐标系", ["gcj02", "wgs84"], format_func=lambda x: "GCJ02(国内)" if x == "gcj02" else "WGS84(GPS)")
     st.subheader("🏠 起飞点")
     hlng = st.number_input("起飞经度", value=st.session_state.home_point[0], format="%.6f")
     hlat = st.number_input("起飞纬度", value=st.session_state.home_point[1], format="%.6f")
@@ -261,7 +230,6 @@ with st.sidebar:
         st.session_state.home_point = (hlng, hlat)
         save_state()
         st.rerun()
-
     st.subheader("🚩 降落点")
     llng = st.number_input("降落经度", value=st.session_state.land_point[0], format="%.6f")
     llat = st.number_input("降落纬度", value=st.session_state.land_point[1], format="%.6f")
@@ -269,12 +237,9 @@ with st.sidebar:
         st.session_state.land_point = (llng, llat)
         save_state()
         st.rerun()
-
     st.subheader("🛫 飞行策略")
-    st.session_state.fly_mode = st.selectbox(
-        "绕飞模式", ["直飞最短", "左侧绕飞", "右侧绕飞", "弧线最短航线"]
-    )
-
+    st.session_state.fly_mode = st.selectbox("绕飞模式", ["直飞最短", "左侧绕飞", "右侧绕飞", "弧线最短航线"])
+    st.session_state.swap_direction = st.checkbox("交换左右方向", value=st.session_state.swap_direction)
     st.subheader("✈️ 航线")
     if st.button("生成航线"):
         st.session_state.waypoints = [st.session_state.home_point, st.session_state.land_point]
@@ -284,16 +249,13 @@ with st.sidebar:
         st.session_state.waypoints = []
         save_state()
         st.rerun()
-
     st.subheader("🚧 圈选障碍物")
     st.write(f"已打点：{len(st.session_state.draw_points)}")
     height = st.number_input("高度(m)", 1, 500, 25)
     name = st.text_input("名称", "教学楼")
     if st.button("✅ 保存障碍物"):
         if len(st.session_state.draw_points) >= 3:
-            st.session_state.obstacles.append({
-                "name": name, "height": height, "points": st.session_state.draw_points.copy()
-            })
+            st.session_state.obstacles.append({"name": name, "height": height, "points": st.session_state.draw_points.copy()})
             st.session_state.draw_points = []
             save_state()
             st.success("保存成功")
@@ -304,7 +266,6 @@ with st.sidebar:
         st.session_state.draw_points = []
         save_state()
         st.rerun()
-
     st.subheader("📋 已保存障碍物")
     obs_names = [f"{i+1}. {o['name']}" for i, o in enumerate(st.session_state.obstacles)]
     if obs_names:
@@ -319,37 +280,14 @@ with st.sidebar:
         save_state()
         st.rerun()
 
-# 地图显示区域
-st.header("🗺️ 航线规划（左侧绕飞=顺时针，右侧绕飞=逆时针）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode}")
-
-# 获取上次保存的地图视图
-center = st.session_state.get("map_center", st.session_state.home_point)
-zoom = st.session_state.get("map_zoom", 19)
-
-m = create_map(
-    center[0], center[1],
-    st.session_state.waypoints,
-    st.session_state.home_point,
-    st.session_state.land_point,
-    st.session_state.obstacles,
-    st.session_state.coord_system,
-    st.session_state.draw_points,
-    st.session_state.fly_mode,
-    zoom
-)
-
-output = st_folium(m, width=1100, height=680, key="main_map")
-
-# 保存当前地图视图（必须在处理打点之前，以便打点后恢复相同视图）
-if output and output.get("center") and output.get("zoom"):
-    st.session_state.map_center = (output["center"]["lng"], output["center"]["lat"])
-    st.session_state.map_zoom = output["zoom"]
-
-# 处理打点
-if output and output.get("last_clicked"):
-    lat = output["last_clicked"]["lat"]
-    lng = output["last_clicked"]["lng"]
+st.header("🗺️ 航线规划（地图永不闪烁）")
+st.success(f"✅ 当前模式：{st.session_state.fly_mode}  |  方向交换：{'是' if st.session_state.swap_direction else '否'}")
+clng, clat = st.session_state.home_point
+m = create_map(clng, clat, st.session_state.waypoints, st.session_state.home_point, st.session_state.land_point, st.session_state.obstacles, st.session_state.coord_system, st.session_state.draw_points, st.session_state.fly_mode, st.session_state.swap_direction)
+o = st_folium(m, width=1100, height=680, key="main_map")
+if o and o.get("last_clicked"):
+    lat = o["last_clicked"]["lat"]
+    lng = o["last_clicked"]["lng"]
     pt = (round(lng, 6), round(lat, 6))
     if st.session_state.last_click != pt:
         st.session_state.last_click = pt
