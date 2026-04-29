@@ -21,61 +21,52 @@ class CoordTransform:
 SAFE_BUFFER = 0.00015   # 约15米
 
 def get_obstacle_with_buffer(obs_poly):
-    """生成障碍物的安全缓冲区（保留直角，不生成圆角）"""
+    """生成障碍物的安全缓冲区（保留直角，避免圆角）"""
     try:
-        # 优先尝试保留直角的缓冲区（高版本shapely）
         return obs_poly.buffer(SAFE_BUFFER, join_style=2, mitre_limit=10.0)
     except:
-        # 兼容低版本shapely（放弃直角，但保证运行）
         return obs_poly.buffer(SAFE_BUFFER)
 
-def get_pure_polyline_around_path(start, end, obstacle, fly_mode):
-    """
-    生成真正的多段折线绕飞路径（仅保留核心拐点，无平滑）
-    fly_mode: "左侧绕飞" / "右侧绕飞"
-    """
-    obs_poly = Polygon(obstacle['points'])
-    buffered = get_obstacle_with_buffer(obs_poly)
+def filter_key_vertices(vertices):
+    """过滤冗余顶点，只保留关键拐点（保证折线特征）"""
+    if len(vertices) < 3:
+        return vertices
     
-    # 手动简化折线（不依赖shapely的simplify函数，兼容所有版本）
-    vertices = list(buffered.exterior.coords)
+    key_vertices = [vertices[0]]
+    prev = vertices[0]
+    curr = vertices[1]
     
-    # 手动过滤冗余顶点（核心：只保留明显的拐点）
-    simplified_vertices = []
-    if len(vertices) > 0:
-        simplified_vertices.append(vertices[0])
-        prev_point = vertices[0]
+    for i in range(2, len(vertices)):
+        next_p = vertices[i]
         
-        for i in range(1, len(vertices)-1):
-            curr_point = vertices[i]
-            next_point = vertices[i+1]
-            
-            # 计算三点夹角：如果是明显的拐点（夹角≠180°）才保留
-            # 向量1：prev -> curr
-            vec1_x = curr_point[0] - prev_point[0]
-            vec1_y = curr_point[1] - prev_point[1]
-            # 向量2：curr -> next
-            vec2_x = next_point[0] - curr_point[0]
-            vec2_y = next_point[1] - curr_point[1]
-            
-            # 计算向量点积（判断是否接近直线）
-            dot_product = vec1_x * vec2_x + vec1_y * vec2_y
-            len1 = math.hypot(vec1_x, vec1_y)
-            len2 = math.hypot(vec2_x, vec2_y)
-            
-            if len1 > 0 and len2 > 0:
-                cos_angle = dot_product / (len1 * len2)
-                # 夹角小于170°才保留（视为拐点）
-                if abs(cos_angle) < math.cos(math.radians(170)):
-                    simplified_vertices.append(curr_point)
-                    prev_point = curr_point
+        # 计算三点是否接近直线（夹角>170°视为直线，过滤中间点）
+        # 向量1：prev -> curr
+        vec1_x = curr[0] - prev[0]
+        vec1_y = curr[1] - prev[1]
+        # 向量2：curr -> next_p
+        vec2_x = next_p[0] - curr[0]
+        vec2_y = next_p[1] - curr[1]
         
-        simplified_vertices.append(vertices[-1])
+        # 点积计算夹角余弦值
+        dot = vec1_x * vec2_x + vec1_y * vec2_y
+        len1 = math.hypot(vec1_x, vec1_y)
+        len2 = math.hypot(vec2_x, vec2_y)
+        
+        if len1 > 1e-8 and len2 > 1e-8:
+            cos_angle = dot / (len1 * len2)
+            # 夹角<170°才保留（视为拐点）
+            if abs(cos_angle) < math.cos(math.radians(170)):
+                key_vertices.append(curr)
+                prev = curr
+        
+        curr = next_p
     
-    # 再次过滤：只保留距离足够的点（避免密集点）
+    key_vertices.append(vertices[-1])
+    
+    # 再次过滤：距离过近的点合并（避免密集点）
     final_vertices = []
     prev = None
-    for p in simplified_vertices:
+    for p in key_vertices:
         if prev is None:
             final_vertices.append(p)
             prev = p
@@ -85,9 +76,19 @@ def get_pure_polyline_around_path(start, end, obstacle, fly_mode):
                 final_vertices.append(p)
                 prev = p
     
-    # 计算起点和终点到障碍物的最近顶点
-    start_pt = Point(start)
-    end_pt = Point(end)
+    return final_vertices
+
+def get_polyline_around_path(start, end, obstacle, fly_mode):
+    """
+    生成多段折线绕飞路径
+    fly_mode: "左侧绕飞" / "右侧绕飞" / "弧线最短航线"
+    """
+    obs_poly = Polygon(obstacle['points'])
+    buffered = get_obstacle_with_buffer(obs_poly)
+    vertices = list(buffered.exterior.coords)[:-1]  # 去除最后一个重复点
+    
+    # 过滤关键顶点（核心：保证折线特征）
+    vertices = filter_key_vertices(vertices)
     
     # 找到起点/终点最近的顶点
     def get_nearest_point(pt, points):
@@ -100,38 +101,60 @@ def get_pure_polyline_around_path(start, end, obstacle, fly_mode):
                 nearest = p
         return nearest
     
-    start_nearest = get_nearest_point(start_pt, final_vertices)
-    end_nearest = get_nearest_point(end_pt, final_vertices)
+    start_pt = Point(start)
+    end_pt = Point(end)
+    start_nearest = get_nearest_point(start_pt, vertices)
+    end_nearest = get_nearest_point(end_pt, vertices)
     
-    # 处理顶点为空的边界情况
     if not start_nearest or not end_nearest:
-        final_vertices = list(buffered.exterior.coords)[:-1]  # 去重最后一个点
-        start_nearest = get_nearest_point(start_pt, final_vertices)
-        end_nearest = get_nearest_point(end_pt, final_vertices)
+        return []
     
-    # 根据绕飞方向选择折线顶点顺序（仅保留核心拐点）
-    try:
-        start_idx = final_vertices.index(start_nearest)
-        end_idx = final_vertices.index(end_nearest)
-    except:
-        # 兼容顶点匹配失败的情况
-        start_idx = 0
-        end_idx = len(final_vertices) - 1
+    start_idx = vertices.index(start_nearest)
+    end_idx = vertices.index(end_nearest)
+    polyline_points = []
     
     if fly_mode == "左侧绕飞":
-        # 左侧绕飞：顺时针遍历核心顶点（真正折线）
+        # 左侧绕飞：顺时针遍历顶点
         if start_idx < end_idx:
-            polyline_points = final_vertices[start_idx:end_idx+1]
+            polyline_points = vertices[start_idx:end_idx+1]
         else:
-            polyline_points = final_vertices[start_idx:] + final_vertices[:end_idx+1]
-    else:
-        # 右侧绕飞：逆时针遍历核心顶点（真正折线）
-        if start_idx > end_idx:
-            polyline_points = final_vertices[end_idx:start_idx+1][::-1]
-        else:
-            polyline_points = (final_vertices[end_idx:] + final_vertices[:start_idx+1])[::-1]
+            polyline_points = vertices[start_idx:] + vertices[:end_idx+1]
     
-    # 最终去重
+    elif fly_mode == "右侧绕飞":
+        # 右侧绕飞：逆时针遍历顶点
+        if start_idx > end_idx:
+            polyline_points = vertices[end_idx:start_idx+1][::-1]
+        else:
+            polyline_points = (vertices[end_idx:] + vertices[:start_idx+1])[::-1]
+    
+    elif fly_mode == "弧线最短航线":
+        # 最短折线：选择顺时针/逆时针中更短的路径
+        # 顺时针路径
+        if start_idx < end_idx:
+            cw_points = vertices[start_idx:end_idx+1]
+        else:
+            cw_points = vertices[start_idx:] + vertices[:end_idx+1]
+        
+        # 逆时针路径
+        if start_idx > end_idx:
+            ccw_points = vertices[end_idx:start_idx+1][::-1]
+        else:
+            ccw_points = (vertices[end_idx:] + vertices[:start_idx+1])[::-1]
+        
+        # 计算两条路径的长度
+        def calc_path_length(points):
+            length = 0
+            for i in range(1, len(points)):
+                length += math.hypot(points[i][0]-points[i-1][0], points[i][1]-points[i-1][1])
+            return length
+        
+        cw_len = calc_path_length(cw_points)
+        ccw_len = calc_path_length(ccw_points)
+        
+        # 选择更短的路径
+        polyline_points = cw_points if cw_len <= ccw_len else ccw_points
+    
+    # 去重
     unique_points = []
     prev = None
     for p in polyline_points:
@@ -143,8 +166,10 @@ def get_pure_polyline_around_path(start, end, obstacle, fly_mode):
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     """
-    左右绕飞：纯多段折线（无任何弧线/平滑）
-    弧线最短：暂时保留（如需也可改为折线）
+    统一所有模式为多段折线：
+    - 直飞最短：单段折线
+    - 左侧/右侧绕飞：指定方向多段折线
+    - 弧线最短航线：最短路径多段折线
     """
     # 无障碍物：直飞（单段折线）
     if not obstacles:
@@ -158,44 +183,13 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     
     # 检测是否需要绕飞
     if not direct_line.intersects(buffered):
-        # 直线不穿过障碍物，直飞（单段折线）
         return [start, end]
     
-    # 需要绕飞
-    if fly_mode == "左侧绕飞" or fly_mode == "右侧绕飞":
-        # 左右绕飞：真正的多段折线（核心修改）
-        polyline_points = get_pure_polyline_around_path(start, end, obstacle, fly_mode)
-        # 拼接完整折线路径：起点 -> 核心拐点 -> 终点
-        full_path = [start] + polyline_points + [end]
-        return full_path
+    # 需要绕飞：生成对应模式的多段折线
+    polyline_points = get_polyline_around_path(start, end, obstacle, fly_mode)
+    full_path = [start] + polyline_points + [end]
     
-    # 弧线最短航线：暂时保留原逻辑（如需可改为最短折线）
-    else:
-        ring = LinearRing(buffered.exterior.coords)
-        start_pt = Point(start)
-        end_pt = Point(end)
-        start_dist = ring.project(start_pt)
-        end_dist = ring.project(end_pt)
-        ring_len = ring.length
-        cw_dist = (end_dist - start_dist) % ring_len
-        ccw_dist = (start_dist - end_dist) % ring_len
-        
-        if cw_dist <= ccw_dist:
-            num_points = 50
-            distances = [start_dist + i * cw_dist / num_points for i in range(num_points + 1)]
-            distances = [d % ring_len for d in distances]
-        else:
-            num_points = 50
-            distances = [start_dist - i * ccw_dist / num_points for i in range(num_points + 1)]
-            distances = [d % ring_len for d in distances]
-        
-        around_points = []
-        for d in distances:
-            p = ring.interpolate(d)
-            around_points.append((p.x, p.y))
-        
-        full_path = [start] + around_points + [end]
-        return full_path
+    return full_path
 
 # ==================== 地图绘制 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
@@ -218,7 +212,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         l_lng, l_lat = land_point if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker([l_lat, l_lng], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
-    # 仅绘制障碍物本体
+    # 绘制障碍物本体
     for ob in obstacles:
         ps = []
         for p in ob['points']:
@@ -231,9 +225,10 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         route = []
         for lng, lat in safe_path:
             if coord_system != 'gcj02':
-                lng, lat = CoordTransform.wgs84_to_gcj02(lng, lat)
+                lng, lat = CoordTransform.wgs84_to_gcj02(*[lng, lat])
             route.append([lat, lng])
 
+        # 不同模式的颜色（保持原有配色）
         color = {
             "直飞最短": "blue",
             "左侧绕飞": "#0066cc",
@@ -241,16 +236,17 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
             "弧线最短航线": "#F79E02"
         }.get(fly_mode, "blue")
         
-        # 绘制纯折线路径（无平滑）
+        # 绘制纯折线路径（无任何顺滑）
         folium.PolyLine(route, color=color, weight=5, opacity=1, popup="无人机航线").add_to(m)
         
         # 标记所有折线拐点（清晰可见）
-        if fly_mode in ["左侧绕飞", "右侧绕飞"] and len(route) > 2:
+        if len(route) > 2:
             for i, (lat, lng) in enumerate(route):
                 if i > 0 and i < len(route)-1:  # 仅标记中间拐点
                     folium.CircleMarker([lat, lng], radius=5, color='yellow', fill=True, 
                                        popup=f"拐点 {i}", weight=2).add_to(m)
 
+    # 绘制临时圈选的障碍物
     if len(temp_points) >= 3:
         ps = [[lat, lng] for lng, lat in temp_points]
         folium.Polygon(locations=ps, color='red', weight=2).add_to(m)
