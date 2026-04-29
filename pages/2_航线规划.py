@@ -5,7 +5,6 @@ import math
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon, LinearRing
-from shapely.ops import unary_union, simplify
 
 st.set_page_config(page_title="航线规划", layout="wide")
 
@@ -23,8 +22,12 @@ SAFE_BUFFER = 0.00015   # 约15米
 
 def get_obstacle_with_buffer(obs_poly):
     """生成障碍物的安全缓冲区（保留直角，不生成圆角）"""
-    # 使用join_style=2保留直角，mitre_limit限制尖角，避免缓冲区圆角
-    return obs_poly.buffer(SAFE_BUFFER, join_style=2, mitre_limit=10.0)
+    try:
+        # 优先尝试保留直角的缓冲区（高版本shapely）
+        return obs_poly.buffer(SAFE_BUFFER, join_style=2, mitre_limit=10.0)
+    except:
+        # 兼容低版本shapely（放弃直角，但保证运行）
+        return obs_poly.buffer(SAFE_BUFFER)
 
 def get_pure_polyline_around_path(start, end, obstacle, fly_mode):
     """
@@ -34,9 +37,53 @@ def get_pure_polyline_around_path(start, end, obstacle, fly_mode):
     obs_poly = Polygon(obstacle['points'])
     buffered = get_obstacle_with_buffer(obs_poly)
     
-    # 简化折线：只保留核心拐点（去除冗余点）
-    simplified = simplify(buffered.exterior, tolerance=0.00005, preserve_topology=True)
-    vertices = list(simplified.coords)
+    # 手动简化折线（不依赖shapely的simplify函数，兼容所有版本）
+    vertices = list(buffered.exterior.coords)
+    
+    # 手动过滤冗余顶点（核心：只保留明显的拐点）
+    simplified_vertices = []
+    if len(vertices) > 0:
+        simplified_vertices.append(vertices[0])
+        prev_point = vertices[0]
+        
+        for i in range(1, len(vertices)-1):
+            curr_point = vertices[i]
+            next_point = vertices[i+1]
+            
+            # 计算三点夹角：如果是明显的拐点（夹角≠180°）才保留
+            # 向量1：prev -> curr
+            vec1_x = curr_point[0] - prev_point[0]
+            vec1_y = curr_point[1] - prev_point[1]
+            # 向量2：curr -> next
+            vec2_x = next_point[0] - curr_point[0]
+            vec2_y = next_point[1] - curr_point[1]
+            
+            # 计算向量点积（判断是否接近直线）
+            dot_product = vec1_x * vec2_x + vec1_y * vec2_y
+            len1 = math.hypot(vec1_x, vec1_y)
+            len2 = math.hypot(vec2_x, vec2_y)
+            
+            if len1 > 0 and len2 > 0:
+                cos_angle = dot_product / (len1 * len2)
+                # 夹角小于170°才保留（视为拐点）
+                if abs(cos_angle) < math.cos(math.radians(170)):
+                    simplified_vertices.append(curr_point)
+                    prev_point = curr_point
+        
+        simplified_vertices.append(vertices[-1])
+    
+    # 再次过滤：只保留距离足够的点（避免密集点）
+    final_vertices = []
+    prev = None
+    for p in simplified_vertices:
+        if prev is None:
+            final_vertices.append(p)
+            prev = p
+        else:
+            dist = math.hypot(p[0]-prev[0], p[1]-prev[1])
+            if dist > 0.00008:  # 约8米距离才保留
+                final_vertices.append(p)
+                prev = p
     
     # 计算起点和终点到障碍物的最近顶点
     start_pt = Point(start)
@@ -53,39 +100,44 @@ def get_pure_polyline_around_path(start, end, obstacle, fly_mode):
                 nearest = p
         return nearest
     
-    start_nearest = get_nearest_point(start_pt, vertices)
-    end_nearest = get_nearest_point(end_pt, vertices)
+    start_nearest = get_nearest_point(start_pt, final_vertices)
+    end_nearest = get_nearest_point(end_pt, final_vertices)
+    
+    # 处理顶点为空的边界情况
+    if not start_nearest or not end_nearest:
+        final_vertices = list(buffered.exterior.coords)[:-1]  # 去重最后一个点
+        start_nearest = get_nearest_point(start_pt, final_vertices)
+        end_nearest = get_nearest_point(end_pt, final_vertices)
     
     # 根据绕飞方向选择折线顶点顺序（仅保留核心拐点）
-    start_idx = vertices.index(start_nearest)
-    end_idx = vertices.index(end_nearest)
+    try:
+        start_idx = final_vertices.index(start_nearest)
+        end_idx = final_vertices.index(end_nearest)
+    except:
+        # 兼容顶点匹配失败的情况
+        start_idx = 0
+        end_idx = len(final_vertices) - 1
     
     if fly_mode == "左侧绕飞":
         # 左侧绕飞：顺时针遍历核心顶点（真正折线）
         if start_idx < end_idx:
-            polyline_points = vertices[start_idx:end_idx+1]
+            polyline_points = final_vertices[start_idx:end_idx+1]
         else:
-            polyline_points = vertices[start_idx:] + vertices[:end_idx+1]
+            polyline_points = final_vertices[start_idx:] + final_vertices[:end_idx+1]
     else:
         # 右侧绕飞：逆时针遍历核心顶点（真正折线）
         if start_idx > end_idx:
-            polyline_points = vertices[end_idx:start_idx+1][::-1]
+            polyline_points = final_vertices[end_idx:start_idx+1][::-1]
         else:
-            polyline_points = (vertices[end_idx:] + vertices[:start_idx+1])[::-1]
+            polyline_points = (final_vertices[end_idx:] + final_vertices[:start_idx+1])[::-1]
     
-    # 再次去重+简化：确保每一段都是明显的直线段
+    # 最终去重
     unique_points = []
     prev = None
     for p in polyline_points:
-        if prev is None:
+        if prev is None or not math.isclose(p[0], prev[0]) or not math.isclose(p[1], prev[1]):
             unique_points.append(p)
             prev = p
-        else:
-            # 只保留距离大于阈值的点（避免密集点）
-            dist = math.hypot(p[0]-prev[0], p[1]-prev[1])
-            if dist > 0.00008:  # 约8米距离才保留拐点
-                unique_points.append(p)
-                prev = p
     
     return unique_points
 
