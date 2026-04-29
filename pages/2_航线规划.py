@@ -415,7 +415,7 @@ with st.sidebar:
 
 # ==================== 地图显示 ====================
 st.header("🗺️ 航线规划（全程顺滑弧线版）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米 | 弧线全程无直线段")
+# 已删除提示文字行
 
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
