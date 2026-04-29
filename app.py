@@ -1,15 +1,23 @@
 import streamlit as st
+import pandas as pd
+import threading
+import time
 import json
 import os
 import math
+from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon
-from datetime import datetime
 
-st.set_page_config(page_title="航线规划", layout="wide")
+st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
 
-# ==================== 辅助函数 ====================
+# ==================== 北京时间 ====================
+BEIJING_TZ = timezone(timedelta(hours=8))
+def get_beijing_time_str():
+    return datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
+
+# ==================== 辅助函数（您的航线规划逻辑） ====================
 class CoordTransform:
     @staticmethod
     def wgs84_to_gcj02(lng, lat):
@@ -247,7 +255,8 @@ if "home_point" not in st.session_state:
         "draw_points": [],
         "last_click": None,
         "fly_mode": "左侧绕飞",
-        "swap_direction": False
+        "swap_direction": False,
+        "page": "飞行监控"   # 当前页面
     }
     for k, v in defaults.items():
         if loaded and k in loaded:
@@ -255,106 +264,176 @@ if "home_point" not in st.session_state:
         else:
             st.session_state[k] = v
 
-# ==================== 侧边栏控件 ====================
+# ==================== 侧边栏（页面切换 + 参数控制） ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
     st.caption("📍 葛关路625号")
+    
+    # 页面切换（不影响地图闪烁）
+    st.session_state.page = st.radio("功能", ["📡 飞行监控", "🗺️ 航线规划"])
+    
+    # 以下控件仅在航线规划页面显示（避免监控页面出现无关控件）
+    if st.session_state.page == "🗺️ 航线规划":
+        st.session_state.coord_system = st.selectbox(
+            "坐标系", ["gcj02", "wgs84"],
+            format_func=lambda x: "GCJ02(国内)" if x == "gcj02" else "WGS84(GPS)"
+        )
+        st.subheader("🏠 起飞点")
+        hlng = st.number_input("起飞经度", value=st.session_state.home_point[0], format="%.6f")
+        hlat = st.number_input("起飞纬度", value=st.session_state.home_point[1], format="%.6f")
+        if st.button("更新起飞点"):
+            st.session_state.home_point = (hlng, hlat)
+            save_state()
+            st.rerun()
 
-    st.session_state.coord_system = st.selectbox(
-        "坐标系", ["gcj02", "wgs84"],
-        format_func=lambda x: "GCJ02(国内)" if x == "gcj02" else "WGS84(GPS)"
-    )
-    st.subheader("🏠 起飞点")
-    hlng = st.number_input("起飞经度", value=st.session_state.home_point[0], format="%.6f")
-    hlat = st.number_input("起飞纬度", value=st.session_state.home_point[1], format="%.6f")
-    if st.button("更新起飞点"):
-        st.session_state.home_point = (hlng, hlat)
-        save_state()
-        st.rerun()
+        st.subheader("🚩 降落点")
+        llng = st.number_input("降落经度", value=st.session_state.land_point[0], format="%.6f")
+        llat = st.number_input("降落纬度", value=st.session_state.land_point[1], format="%.6f")
+        if st.button("更新降落点"):
+            st.session_state.land_point = (llng, llat)
+            save_state()
+            st.rerun()
 
-    st.subheader("🚩 降落点")
-    llng = st.number_input("降落经度", value=st.session_state.land_point[0], format="%.6f")
-    llat = st.number_input("降落纬度", value=st.session_state.land_point[1], format="%.6f")
-    if st.button("更新降落点"):
-        st.session_state.land_point = (llng, llat)
-        save_state()
-        st.rerun()
+        st.subheader("🛫 飞行策略")
+        st.session_state.fly_mode = st.selectbox(
+            "绕飞模式", ["直飞最短", "左侧绕飞", "右侧绕飞", "弧线最短航线"]
+        )
+        st.session_state.swap_direction = st.checkbox("交换左右方向", value=st.session_state.swap_direction)
 
-    st.subheader("🛫 飞行策略")
-    st.session_state.fly_mode = st.selectbox(
-        "绕飞模式", ["直飞最短", "左侧绕飞", "右侧绕飞", "弧线最短航线"]
-    )
-    st.session_state.swap_direction = st.checkbox("交换左右方向", value=st.session_state.swap_direction)
+        st.subheader("✈️ 航线")
+        if st.button("生成航线"):
+            st.session_state.waypoints = [st.session_state.home_point, st.session_state.land_point]
+            save_state()
+            st.rerun()
+        if st.button("清空航线"):
+            st.session_state.waypoints = []
+            save_state()
+            st.rerun()
 
-    st.subheader("✈️ 航线")
-    if st.button("生成航线"):
-        st.session_state.waypoints = [st.session_state.home_point, st.session_state.land_point]
-        save_state()
-        st.rerun()
-    if st.button("清空航线"):
-        st.session_state.waypoints = []
-        save_state()
-        st.rerun()
-
-    st.subheader("🚧 圈选障碍物")
-    st.write(f"已打点：{len(st.session_state.draw_points)}")
-    height = st.number_input("高度(m)", 1, 500, 25)
-    name = st.text_input("名称", "教学楼")
-    if st.button("✅ 保存障碍物"):
-        if len(st.session_state.draw_points) >= 3:
-            st.session_state.obstacles.append({
-                "name": name, "height": height, "points": st.session_state.draw_points.copy()
-            })
+        st.subheader("🚧 圈选障碍物")
+        st.write(f"已打点：{len(st.session_state.draw_points)}")
+        height = st.number_input("高度(m)", 1, 500, 25)
+        name = st.text_input("名称", "教学楼")
+        if st.button("✅ 保存障碍物"):
+            if len(st.session_state.draw_points) >= 3:
+                st.session_state.obstacles.append({
+                    "name": name, "height": height, "points": st.session_state.draw_points.copy()
+                })
+                st.session_state.draw_points = []
+                save_state()
+                st.success("保存成功")
+                st.rerun()
+            else:
+                st.warning("至少3个点")
+        if st.button("❌ 清空当前打点"):
             st.session_state.draw_points = []
             save_state()
-            st.success("保存成功")
             st.rerun()
-        else:
-            st.warning("至少3个点")
-    if st.button("❌ 清空当前打点"):
-        st.session_state.draw_points = []
-        save_state()
-        st.rerun()
 
-    st.subheader("📋 已保存障碍物")
-    obs_names = [f"{i+1}. {o['name']}" for i, o in enumerate(st.session_state.obstacles)]
-    if obs_names:
-        selected = st.selectbox("选择删除", obs_names)
-        if st.button("删除选中"):
-            idx = int(selected.split(".")[0]) - 1
-            st.session_state.obstacles.pop(idx)
+        st.subheader("📋 已保存障碍物")
+        obs_names = [f"{i+1}. {o['name']}" for i, o in enumerate(st.session_state.obstacles)]
+        if obs_names:
+            selected = st.selectbox("选择删除", obs_names)
+            if st.button("删除选中"):
+                idx = int(selected.split(".")[0]) - 1
+                st.session_state.obstacles.pop(idx)
+                save_state()
+                st.rerun()
+        if st.button("🗑️ 清空所有障碍物"):
+            st.session_state.obstacles = []
             save_state()
             st.rerun()
-    if st.button("🗑️ 清空所有障碍物"):
-        st.session_state.obstacles = []
-        save_state()
-        st.rerun()
 
-# ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（地图独立，永不闪烁）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode}  |  方向交换：{'是' if st.session_state.swap_direction else '否'}")
+# ==================== 飞行监控页面（后台线程心跳，无闪烁） ====================
+if st.session_state.page == "📡 飞行监控":
+    st.header("📡 飞行监控（1秒精准心跳 · 无闪烁）")
 
-clng, clat = st.session_state.home_point
-m = create_map(
-    clng, clat,
-    st.session_state.waypoints,
-    st.session_state.home_point,
-    st.session_state.land_point,
-    st.session_state.obstacles,
-    st.session_state.coord_system,
-    st.session_state.draw_points,
-    st.session_state.fly_mode,
-    st.session_state.swap_direction
-)
-o = st_folium(m, width=1100, height=680, key="main_map")
+    if "heartbeat_data" not in st.session_state:
+        st.session_state.heartbeat_data = []
+        st.session_state.seq = 0
+        st.session_state.running = False
+        st.session_state.last_beat_time = time.time()
 
-if o and o.get("last_clicked"):
-    lat = o["last_clicked"]["lat"]
-    lng = o["last_clicked"]["lng"]
-    pt = (round(lng, 6), round(lat, 6))
-    if st.session_state.last_click != pt:
-        st.session_state.last_click = pt
-        st.session_state.draw_points.append(pt)
-        save_state()
-        st.rerun()
+    # 后台线程函数
+    def heartbeat_worker():
+        while st.session_state.running:
+            now = time.time()
+            if now - st.session_state.last_beat_time >= 1.0:
+                st.session_state.seq += 1
+                t = get_beijing_time_str()
+                st.session_state.heartbeat_data.append({
+                    "序号": st.session_state.seq,
+                    "时间": t,
+                    "状态": "在线正常"
+                })
+                if len(st.session_state.heartbeat_data) > 60:
+                    st.session_state.heartbeat_data.pop(0)
+                st.session_state.last_beat_time = now
+            time.sleep(0.2)
+
+    # 控制线程
+    if "heartbeat_thread" not in st.session_state:
+        st.session_state.heartbeat_thread = None
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("▶️ 开始心跳", use_container_width=True):
+            if not st.session_state.running:
+                st.session_state.running = True
+                st.session_state.last_beat_time = time.time()
+                if st.session_state.heartbeat_thread is None or not st.session_state.heartbeat_thread.is_alive():
+                    st.session_state.heartbeat_thread = threading.Thread(target=heartbeat_worker, daemon=True)
+                    st.session_state.heartbeat_thread.start()
+    with col2:
+        if st.button("⏸️ 暂停心跳", use_container_width=True):
+            st.session_state.running = False
+
+    # 局部刷新区域（使用 st.empty 循环，不会导致整个页面重绘）
+    placeholder = st.empty()
+    while st.session_state.running:
+        df = pd.DataFrame(st.session_state.heartbeat_data)
+        with placeholder.container():
+            if not df.empty:
+                st.line_chart(df, x="时间", y="序号", color="#ff4560")
+                st.dataframe(df, use_container_width=True, height=220)
+            else:
+                st.info("等待心跳数据...")
+        time.sleep(0.5)  # 每0.5秒刷新一次显示（不是心跳生成间隔）
+    else:
+        # 未运行时显示最后一次数据
+        df = pd.DataFrame(st.session_state.heartbeat_data)
+        if not df.empty:
+            st.line_chart(df, x="时间", y="序号", color="#ff4560")
+            st.dataframe(df, use_container_width=True, height=220)
+        else:
+            st.info("点击「开始心跳」查看实时数据")
+
+# ==================== 航线规划页面（地图独立，永不闪烁） ====================
+else:
+    st.header("🗺️ 航线规划（地图独立，心跳不影响）")
+    st.success(f"✅ 当前模式：{st.session_state.fly_mode}  |  方向交换：{'是' if st.session_state.swap_direction else '否'}")
+
+    clng, clat = st.session_state.home_point
+    m = create_map(
+        clng, clat,
+        st.session_state.waypoints,
+        st.session_state.home_point,
+        st.session_state.land_point,
+        st.session_state.obstacles,
+        st.session_state.coord_system,
+        st.session_state.draw_points,
+        st.session_state.fly_mode,
+        st.session_state.swap_direction
+    )
+    o = st_folium(m, width=1100, height=680, key="main_map")
+
+    if o and o.get("last_clicked"):
+        lat = o["last_clicked"]["lat"]
+        lng = o["last_clicked"]["lng"]
+        pt = (round(lng, 6), round(lat, 6))
+        if st.session_state.last_click != pt:
+            st.session_state.last_click = pt
+            st.session_state.draw_points.append(pt)
+            save_state()
+            st.rerun()
