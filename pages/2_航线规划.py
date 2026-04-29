@@ -2,25 +2,11 @@ import streamlit as st
 import json
 import os
 import math
-import time
-import threading
-import pandas as pd
-from datetime import datetime, timezone, timedelta
 import folium
 from streamlit_folium import st_folium
 from shapely.geometry import Point, LineString, Polygon, LinearRing
 
-# ==================== 全局变量（心跳包专用） ====================
-GLOBAL_HEARTBEAT_DATA = []
-GLOBAL_SEQ = 0
-GLOBAL_RUNNING = False
-
-st.set_page_config(page_title="南京科技职业学院无人机地面站", layout="wide")
-
-# ==================== 北京时间 ====================
-BEIJING_TZ = timezone(timedelta(hours=8))
-def get_beijing_time_str():
-    return datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
+st.set_page_config(page_title="航线规划", layout="wide")
 
 # ==================== 坐标转换 ====================
 class CoordTransform:
@@ -225,7 +211,7 @@ def global_smooth_path(points, num_segments=50):
             t2 = t*t
             t3 = t2*t
             x = 0.5 * (2*p1[0] + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
-            y = 0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+            y = 0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[0]-3*p2[1]+p3[1])*t3)
             smooth.append((x, y))
     
     uniq = []
@@ -264,7 +250,7 @@ def global_bezier_smooth(points):
 
 # ==================== 地图绘制 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("map_zoom", 19),
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("zoom", 19),
                    control_scale=True, tiles=None)
 
     folium.TileLayer(
@@ -308,6 +294,8 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         
         # 绘制路径：折线/曲线区分显示
         folium.PolyLine(route, color=color, weight=5, opacity=1, popup="无人机航线").add_to(m)
+        
+        # 🔥 已删除：左右绕飞的黄色拐点标记，现在是纯折线！
 
     if len(temp_points) >= 3:
         ps = [[lat, lng] for lng, lat in temp_points]
@@ -317,20 +305,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
 
     folium.LayerControl().add_to(m)
     return m
-
-# ==================== 心跳包线程 ====================
-def heartbeat_worker():
-    """后台线程，严格1秒一次发送心跳"""
-    global GLOBAL_HEARTBEAT_DATA, GLOBAL_SEQ, GLOBAL_RUNNING
-    while GLOBAL_RUNNING:
-        GLOBAL_SEQ += 1
-        t = get_beijing_time_str()
-        GLOBAL_HEARTBEAT_DATA.append({
-            "序号": GLOBAL_SEQ, "时间": t, "状态": "在线正常"
-        })
-        if len(GLOBAL_HEARTBEAT_DATA) > 60:
-            GLOBAL_HEARTBEAT_DATA.pop(0)
-        time.sleep(1.0)  # 严格1秒间隔
 
 # ==================== 状态持久化 ====================
 STATE_FILE = "ground_station_state.json"
@@ -369,8 +343,7 @@ if "home_point" not in st.session_state:
         "last_click": None,
         "fly_mode": "左侧绕飞",
         "map_zoom": 19,
-        "map_center": (OFFICIAL_LNG, OFFICIAL_LAT),
-        "page": "航线规划"
+        "map_center": (OFFICIAL_LNG, OFFICIAL_LAT)
     }
     for k, v in defaults.items():
         if loaded and k in loaded:
@@ -383,10 +356,6 @@ with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
     st.caption("📍 葛关路625号")
-
-    # 页面选择
-    page=st.radio("功能",["📡 飞行监控","🗺️ 航线规划"])
-    st.session_state.page=page
 
     st.session_state.coord_system = st.selectbox(
         "坐标系", ["gcj02", "wgs84"],
@@ -458,72 +427,34 @@ with st.sidebar:
         save_state()
         st.rerun()
 
-# ==================== 飞行监控页面 ====================
-if "飞行监控" in st.session_state.page:
-    st.header("📡 飞行监控（1秒/次心跳）")
+# ==================== 地图显示 ====================
+st.header("🗺️ 航线规划")
 
-    c1, c2 = st.columns(2)
-    with c1:
-        # 先声明global，再使用
-        global GLOBAL_RUNNING
-        if st.button("▶️ 开始心跳监测", use_container_width=True):
-            if not GLOBAL_RUNNING:
-                GLOBAL_RUNNING = True
-                # 启动后台线程
-                t = threading.Thread(target=heartbeat_worker, daemon=True)
-                t.start()
-                st.rerun()
-    with c2:
-        global GLOBAL_RUNNING
-        if st.button("⏸️ 暂停心跳监测", use_container_width=True):
-            GLOBAL_RUNNING = False
-            st.rerun()
+center = st.session_state.get("map_center", st.session_state.home_point)
+zoom = st.session_state.get("map_zoom", 19)
 
-    placeholder = st.empty()
+m = create_map(
+    center[0], center[1],
+    st.session_state.waypoints,
+    st.session_state.home_point,
+    st.session_state.land_point,
+    st.session_state.obstacles,
+    st.session_state.coord_system,
+    st.session_state.draw_points,
+    st.session_state.fly_mode
+)
+output = st_folium(m, width=1100, height=680, key="main_map")
 
-    with placeholder.container():
-        global GLOBAL_HEARTBEAT_DATA
-        df = pd.DataFrame(GLOBAL_HEARTBEAT_DATA)
-        if not df.empty:
-            st.line_chart(df, x="时间", y="序号", color="#ff4560")
-            st.dataframe(df, use_container_width=True, height=200)
+if output and output.get("center") and output.get("zoom"):
+    st.session_state.map_center = (output["center"]["lng"], output["center"]["lat"])
+    st.session_state.map_zoom = output["zoom"]
 
-    # 快速重绘更新UI
-    global GLOBAL_RUNNING
-    if GLOBAL_RUNNING:
-        time.sleep(0.1)
-        st.rerun()
-
-# ==================== 航线规划页面 ====================
-else:
-    st.header("🗺️ 航线规划（边界绕飞版）")
-    st.success("✅ 沿障碍物边界绕飞 | ✅ 15米安全缓冲区 | ✅ 严格1秒心跳")
-
-    center = st.session_state.get("map_center", st.session_state.home_point)
-    zoom = st.session_state.get("map_zoom", 19)
-
-    m = create_map(
-        center[0], center[1],
-        st.session_state.waypoints,
-        st.session_state.home_point,
-        st.session_state.land_point,
-        st.session_state.obstacles,
-        st.session_state.coord_system,
-        st.session_state.draw_points,
-        st.session_state.fly_mode
-    )
-    output = st_folium(m, width=1100, height=680, key="main_map")
-
-    if output and output.get("center") and output.get("zoom"):
-        st.session_state.map_center = (output["center"]["lng"], output["center"]["lat"])
-        st.session_state.map_zoom = output["zoom"]
-
-    if output and output.get("last_clicked"):
-        lat = output["last_clicked"]["lat"]
-        lng = output["last_clicked"]["lng"]
-        pt = (round(lng, 6), round(lat, 6))
-        if st.session_state.last_click != pt:
-            st.session_state.last_click = pt
-            st.session_state.draw_points.append(pt)
-            save_state()
-            st.rerun()
+if output and output.get("last_clicked"):
+    lat = output["last_clicked"]["lat"]
+    lng = output["last_clicked"]["lng"]
+    pt = (round(lng, 6), round(lat, 6))
+    if st.session_state.last_click != pt:
+        st.session_state.last_click = pt
+        st.session_state.draw_points.append(pt)
+        save_state()
+        st.rerun()  
