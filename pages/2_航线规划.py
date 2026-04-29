@@ -24,79 +24,66 @@ def get_obstacle_with_buffer(obs_poly):
     """生成障碍物的安全缓冲区（向外扩展）"""
     return obs_poly.buffer(SAFE_BUFFER)
 
-def get_around_path(start, end, obstacle, fly_mode):
+def get_smooth_around_path(start, end, obstacle):
     """
-    核心：生成绕飞路径（左右绕飞已交换）
-    - 左侧绕飞：顺时针
-    - 右侧绕飞：逆时针
+    生成完全顺滑的绕飞路径（无直线段）
+    直接基于障碍物边界生成连续的曲线点
     """
     obs_poly = Polygon(obstacle['points'])
     buffered = get_obstacle_with_buffer(obs_poly)
     ring = LinearRing(buffered.exterior.coords)
     
-    # 计算起点/终点到障碍物的最近点
+    # 计算起点/终点在环上的投影
     start_pt = Point(start)
     end_pt = Point(end)
     start_dist = ring.project(start_pt)
     end_dist = ring.project(end_pt)
     
-    # 优化采样点数，减少冗余
-    num_points = 20  
-    path_points = []
+    # 计算顺时针和逆时针的完整路径长度
+    ring_len = ring.length
+    cw_dist = (end_dist - start_dist) % ring_len
+    ccw_dist = (start_dist - end_dist) % ring_len
     
-    # 交换后的左右绕飞逻辑
-    if fly_mode == "左侧绕飞":
-        # 左侧绕飞 → 顺时针
-        if start_dist > end_dist:
-            distances = [start_dist + i*((ring.length - start_dist) + end_dist)/num_points for i in range(num_points+1)]
-            distances = [d % ring.length for d in distances]
-        else:
-            distances = [start_dist + i*(end_dist - start_dist)/num_points for i in range(num_points+1)]
-    elif fly_mode == "右侧绕飞":
-        # 右侧绕飞 → 逆时针
-        if start_dist < end_dist:
-            distances = [start_dist - i*(start_dist + (ring.length - end_dist))/num_points for i in range(num_points+1)]
-            distances = [d % ring.length for d in distances]
-        else:
-            distances = [start_dist - i*(start_dist - end_dist)/num_points for i in range(num_points+1)]
+    # 选择更短的方向（保证最短）
+    if cw_dist <= ccw_dist:
+        # 顺时针：生成连续的投影点
+        num_points = 50  # 密集采样，保证无直线
+        distances = [start_dist + i * cw_dist / num_points for i in range(num_points + 1)]
+        distances = [d % ring_len for d in distances]
     else:
-        return []
+        # 逆时针：生成连续的投影点
+        num_points = 50
+        distances = [start_dist - i * ccw_dist / num_points for i in range(num_points + 1)]
+        distances = [d % ring_len for d in distances]
     
-    # 生成绕飞点（去重，避免重复点导致路径卡顿）
-    prev_pt = None
+    # 生成连续的绕飞点（无直线段）
+    around_points = []
     for d in distances:
         p = ring.interpolate(d)
-        curr_pt = (p.x, p.y)
-        if prev_pt is None or math.hypot(curr_pt[0]-prev_pt[0], curr_pt[1]-prev_pt[1]) > 1e-8:
-            path_points.append(curr_pt)
-            prev_pt = curr_pt
+        around_points.append((p.x, p.y))
     
-    return path_points
+    return around_points
 
 def plan_safe_path(start, end, obstacles, fly_mode):
     """
-    最终优化：
-    1. 修复弧线最短路径逻辑（真正最短）
-    2. 简化弧线计算，避免过度绕飞
-    3. 保持左右绕飞正确
+    最终优化：全程顺滑弧线，无直线段
     """
-    # 无障碍物：直飞/自然弧线
+    # 无障碍物：纯贝塞尔弧线（无任何直线）
     if not obstacles:
         if fly_mode == "弧线最短航线":
-            # 生成自然、短弧度的贝塞尔曲线（真正最短弧线）
-            # 计算中点偏移（小幅度，保证最短且有弧线）
+            # 生成纯弧线，无直线段
             mid_x, mid_y = (start[0]+end[0])/2, (start[1]+end[1])/2
-            # 偏移方向垂直于起点-终点连线，偏移量更小（保证最短）
             dx = end[0] - start[0]
             dy = end[1] - start[1]
-            perp_x = -dy * 0.0004  # 减小偏移量，保证弧线最短
+            # 小偏移保证弧线且最短
+            perp_x = -dy * 0.0004
             perp_y = dx * 0.0004
             ctrl_x = mid_x + perp_x
             ctrl_y = mid_y + perp_y
             
-            # 生成贝塞尔曲线点（采样30个，平衡顺滑和最短）
+            # 密集采样（100个点），保证弧线极致顺滑
             bezier_points = []
-            for t in [i/30 for i in range(31)]:
+            for t in [i/100 for i in range(101)]:
                 x = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
                 y = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl_y + t**2 * end[1]
                 bezier_points.append((x, y))
@@ -111,7 +98,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     
     # 检测是否需要绕飞
     if not direct_line.intersects(buffered):
-        # 直线不穿过障碍物，直接生成短弧线
+        # 直线不穿过障碍物，纯弧线
         if fly_mode == "弧线最短航线":
             mid_x, mid_y = (start[0]+end[0])/2, (start[1]+end[1])/2
             dx = end[0] - start[0]
@@ -122,7 +109,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
             ctrl_y = mid_y + perp_y
             
             bezier_points = []
-            for t in [i/30 for i in range(31)]:
+            for t in [i/100 for i in range(101)]:
                 x = (1-t)**2 * start[0] + 2*(1-t)*t * ctrl_x + t**2 * end[0]
                 y = (1-t)**2 * start[1] + 2*(1-t)*t * ctrl_y + t**2 * end[1]
                 bezier_points.append((x, y))
@@ -130,65 +117,127 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         return [start, end]
     
     # 需要绕飞
-    if fly_mode in ["左侧绕飞", "右侧绕飞"]:
-        around_points = get_around_path(start, end, obstacle, fly_mode)
+    if fly_mode == "左侧绕飞":
+        # 左侧绕飞（顺时针）- 顺滑版
+        obs_poly = Polygon(obstacle['points'])
+        buffered = get_obstacle_with_buffer(obs_poly)
+        ring = LinearRing(buffered.exterior.coords)
+        start_dist = ring.project(Point(start))
+        end_dist = ring.project(Point(end))
+        ring_len = ring.length
+        cw_dist = (end_dist - start_dist) % ring_len
+        
+        num_points = 50
+        distances = [start_dist + i * cw_dist / num_points for i in range(num_points + 1)]
+        distances = [d % ring_len for d in distances]
+        
+        around_points = []
+        for d in distances:
+            p = ring.interpolate(d)
+            around_points.append((p.x, p.y))
+        
         full_path = [start] + around_points + [end]
-        return full_path
+        # 对完整路径做全局顺滑
+        return global_smooth_path(full_path)
+    
+    elif fly_mode == "右侧绕飞":
+        # 右侧绕飞（逆时针）- 顺滑版
+        obs_poly = Polygon(obstacle['points'])
+        buffered = get_obstacle_with_buffer(obs_poly)
+        ring = LinearRing(buffered.exterior.coords)
+        start_dist = ring.project(Point(start))
+        end_dist = ring.project(Point(end))
+        ring_len = ring.length
+        ccw_dist = (start_dist - end_dist) % ring_len
+        
+        num_points = 50
+        distances = [start_dist - i * ccw_dist / num_points for i in range(num_points + 1)]
+        distances = [d % ring_len for d in distances]
+        
+        around_points = []
+        for d in distances:
+            p = ring.interpolate(d)
+            around_points.append((p.x, p.y))
+        
+        full_path = [start] + around_points + [end]
+        # 对完整路径做全局顺滑
+        return global_smooth_path(full_path)
+    
     elif fly_mode == "弧线最短航线":
-        # 核心修复：精准计算最短绕飞路径
-        def calc_path_length(points):
-            """计算路径总长度"""
-            length = 0
-            for i in range(1, len(points)):
-                length += math.hypot(points[i][0]-points[i-1][0], points[i][1]-points[i-1][1])
-            return length
-        
-        # 生成左右绕飞的完整路径
-        left_around = get_around_path(start, end, obstacle, "左侧绕飞")
-        right_around = get_around_path(start, end, obstacle, "右侧绕飞")
-        
-        left_full = [start] + left_around + [end]
-        right_full = [start] + right_around + [end]
-        
-        # 计算真实长度，选更短的
-        left_len = calc_path_length(left_full)
-        right_len = calc_path_length(right_full)
-        shortest_around = left_around if left_len < right_len else right_around
-        
-        # 生成短弧线（基于最短绕飞路径，平滑但不额外增加长度）
-        def smooth_short_path(points, num_segments=15):
-            """轻量级平滑，保证最短"""
-            if len(points) < 3:
-                return points
-            smooth = []
-            for i in range(len(points)-1):
-                p0 = points[max(0, i-1)]
-                p1 = points[i]
-                p2 = points[i+1]
-                p3 = points[min(len(points)-1, i+2)]
-                # 减少插值点，避免过度平滑导致路径变长
-                for t in [j/num_segments for j in range(num_segments+1)]:
-                    t2 = t*t
-                    t3 = t2*t
-                    x = 0.5 * (2*p1[0] + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
-                    y = 0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
-                    smooth.append((x, y))
-            # 去重
-            uniq = []
-            prev = None
-            for p in smooth:
-                if prev is None or math.hypot(p[0]-prev[0], p[1]-prev[1]) > 1e-8:
-                    uniq.append(p)
-                    prev = p
-            return uniq
-        
-        # 完整最短弧线路径
-        core_path = [start] + shortest_around + [end]
-        return smooth_short_path(core_path)
+        # 弧线最短：生成完全顺滑的绕飞弧线（无直线段）
+        around_points = get_smooth_around_path(start, end, obstacle)
+        # 拼接完整路径
+        full_path = [start] + around_points + [end]
+        # 全局贝塞尔顺滑，彻底消除直线段
+        return global_bezier_smooth(full_path)
     else:
         return [start, end]
 
-# ==================== 地图绘制（移除安全缓冲区显示） ====================
+def global_smooth_path(points, num_segments=50):
+    """
+    全局路径顺滑：对整个路径做Catmull-Rom插值，彻底消除直线段
+    """
+    if len(points) < 2:
+        return points
+    
+    smooth = []
+    # 扩展起点和终点（保证首尾顺滑）
+    extended = [points[0]] + points + [points[-1]]
+    
+    for i in range(1, len(extended)-1):
+        p0 = extended[i-1]
+        p1 = extended[i]
+        p2 = extended[i+1]
+        p3 = extended[i+2] if (i+2) < len(extended) else p2
+        
+        for t in [j/num_segments for j in range(num_segments+1)]:
+            t2 = t*t
+            t3 = t2*t
+            x = 0.5 * (2*p1[0] + (-p0[0]+p2[0])*t + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*t2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*t3)
+            y = 0.5 * (2*p1[1] + (-p0[1]+p2[1])*t + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*t2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*t3)
+            smooth.append((x, y))
+    
+    # 去重并保留顺序
+    uniq = []
+    prev = None
+    for p in smooth:
+        if prev is None or math.hypot(p[0]-prev[0], p[1]-prev[1]) > 1e-9:
+            uniq.append(p)
+            prev = p
+    return uniq
+
+def global_bezier_smooth(points):
+    """
+    全局贝塞尔顺滑：将整个路径转换为单条贝塞尔曲线，无任何直线段
+    """
+    if len(points) < 3:
+        return global_smooth_path(points)
+    
+    # 提取关键点生成贝塞尔控制点
+    num_ctrl = len(points) - 1
+    ctrl_pts = []
+    for i in range(num_ctrl):
+        # 均匀分布控制点
+        t = i / num_ctrl
+        ctrl_pts.append((
+            (1-t)*points[i][0] + t*points[i+1][0],
+            (1-t)*points[i][1] + t*points[i+1][1]
+        ))
+    
+    # 生成全局贝塞尔曲线（100个点，极致顺滑）
+    bezier = []
+    for t in [i/100 for i in range(101)]:
+        x = 0
+        y = 0
+        n = len(ctrl_pts) - 1
+        for i in range(len(ctrl_pts)):
+            coeff = math.comb(n, i) * (1-t)**(n-i) * t**i
+            x += coeff * ctrl_pts[i][0]
+            y += coeff * ctrl_pts[i][1]
+        bezier.append((x, y))
+    return bezier
+
+# ==================== 地图绘制 ====================
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("map_zoom", 19),
                    control_scale=True, tiles=None)
@@ -209,7 +258,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         l_lng, l_lat = land_point if coord_system == 'gcj02' else CoordTransform.wgs84_to_gcj02(*land_point)
         folium.Marker([l_lat, l_lng], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
-    # 仅绘制障碍物本体（移除安全缓冲区显示）
+    # 仅绘制障碍物本体
     for ob in obstacles:
         ps = []
         for p in ob['points']:
@@ -231,6 +280,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
             "右侧绕飞": "#000000",
             "弧线最短航线": "#F79E02"
         }.get(fly_mode, "blue")
+        # 绘制顺滑航线，无直线段
         folium.PolyLine(route, color=color, weight=5, opacity=1, popup="无人机航线").add_to(m)
 
     if len(temp_points) >= 3:
@@ -364,8 +414,8 @@ with st.sidebar:
         st.rerun()
 
 # ==================== 地图显示 ====================
-st.header("🗺️ 航线规划（最终优化版）")
-st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米")
+st.header("🗺️ 航线规划（全程顺滑弧线版）")
+st.success(f"✅ 当前模式：{st.session_state.fly_mode} | 安全距离约15米 | 弧线全程无直线段")
 
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
