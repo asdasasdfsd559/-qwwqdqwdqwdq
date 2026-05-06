@@ -3,10 +3,10 @@ import pandas as pd
 import math
 import random
 import time
-import json
 from datetime import datetime, timezone, timedelta
 import folium
-from streamlit.components.v1 import html
+from streamlit_folium import st_folium
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="飞行监控", layout="wide")
 
@@ -85,21 +85,18 @@ def get_current_position(task):
         cumulative += d
     return task["waypoints"][-1]
 
-def build_static_map(waypoints, obstacles):
-    """
-    构建完整的地图HTML（包含规划航线、障碍物、起点终点）
-    返回地图对象的 HTML 字符串和地图中心经纬度
-    """
-    if not waypoints or len(waypoints) < 2:
-        # 默认位置
-        center = [32.234097, 118.749413]
-        zoom = 16
+def create_flight_map(task, obstacles):
+    if not task or not task["waypoints"]:
+        m = folium.Map(location=[32.234097, 118.749413], zoom_start=16, control_scale=True)
     else:
-        center = [waypoints[0][1], waypoints[0][0]]
-        zoom = 18
-    m = folium.Map(location=center, zoom_start=zoom, control_scale=True)
+        current_pos = get_current_position(task)
+        if current_pos:
+            center = [current_pos[1], current_pos[0]]
+        else:
+            center = [task["waypoints"][0][1], task["waypoints"][0][0]]
+        m = folium.Map(location=center, zoom_start=18, control_scale=True)
 
-    # 添加底图
+    # 底图
     folium.TileLayer(
         tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
         attr='高德-街道', name='街道图'
@@ -109,51 +106,77 @@ def build_static_map(waypoints, obstacles):
         attr='高德-卫星', name='卫星图'
     ).add_to(m)
 
-    # 添加障碍物（原始多边形，红色）
+    # 障碍物（红色）
     for ob in obstacles:
         points = [[p[1], p[0]] for p in ob['points']]
         folium.Polygon(locations=points, color='red', fill=True, fill_opacity=0.5, popup=ob['name']).add_to(m)
 
     # 规划航线（蓝色）
+    waypoints = task["waypoints"]
     route = [[lat, lng] for lng, lat in waypoints]
     folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
+
+    # 已飞路径（绿色）
+    flown_dist = task["flown_distance"]
+    if flown_dist > 0:
+        flown_points = []
+        cumulative = 0.0
+        segs = task["seg_distances"]
+        for i, d in enumerate(segs):
+            if cumulative + d <= flown_dist:
+                flown_points.append(waypoints[i])
+                flown_points.append(waypoints[i+1])
+            else:
+                ratio = (flown_dist - cumulative) / d if d > 0 else 1.0
+                w1 = waypoints[i]
+                w2 = waypoints[i+1]
+                interp = (w1[0] + (w2[0]-w1[0])*ratio, w1[1] + (w2[1]-w1[1])*ratio)
+                flown_points.append(w1)
+                flown_points.append(interp)
+                break
+            cumulative += d
+        unique_flown = []
+        for p in flown_points:
+            if not unique_flown or (p[0] != unique_flown[-1][0] or p[1] != unique_flown[-1][1]):
+                unique_flown.append(p)
+        if len(unique_flown) >= 2:
+            flown_route = [[lat, lng] for lng, lat in unique_flown]
+            folium.PolyLine(flown_route, color='green', weight=4, opacity=0.9, popup="已飞路径").add_to(m)
+
+    # 无人机当前位置（红色飞机图标）
+    current_pos = get_current_position(task)
+    if current_pos:
+        folium.Marker(
+            location=[current_pos[1], current_pos[0]],
+            icon=folium.Icon(color='red', icon='plane', prefix='fa'),
+            popup=f"当前位置 ({current_pos[0]:.6f}, {current_pos[1]:.6f})"
+        ).add_to(m)
 
     # 起点和终点
     folium.Marker([waypoints[0][1], waypoints[0][0]], icon=folium.Icon(color='green', icon='play'), popup="起飞点").add_to(m)
     folium.Marker([waypoints[-1][1], waypoints[-1][0]], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
     folium.LayerControl().add_to(m)
-    # 将地图转换为HTML字符串
-    map_html = m.get_root().render()
-    return map_html, (center[0], center[1])
+    return m
 
 # ==================== 页面主体 ====================
 st.header("🚁 飞行实时画面 - 任务执行监控")
 
-# 初始化 session_state
+# 初始化状态
 if "flight_task" not in st.session_state:
     st.session_state.flight_task = None
-if "static_map_html" not in st.session_state:
-    st.session_state.static_map_html = None
-if "map_center" not in st.session_state:
-    st.session_state.map_center = None
+if "heartbeat_data" not in st.session_state:
+    st.session_state.heartbeat_data = []
+    st.session_state.seq = 0
+    st.session_state.running = True
 
-# 获取航点和障碍物（从航线规划传递过来）
+# 从航线规划中获取航点和障碍物
 waypoints = st.session_state.get("flight_waypoints", [])
-obstacles = st.session_state.get("obstacles", [])   # 从航线规划中获取障碍物列表
+obstacles = st.session_state.get("obstacles", [])
 
-# 更新飞行任务
-if st.session_state.flight_task is None:
-    if waypoints and len(waypoints) >= 2:
-        st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
-elif st.session_state.flight_task and st.session_state.flight_task.get("waypoints") != waypoints:
+# 初始化飞行任务
+if st.session_state.flight_task is None and waypoints and len(waypoints) >= 2:
     st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
-
-# 生成静态地图（只生成一次）
-if st.session_state.static_map_html is None and waypoints and len(waypoints) >= 2:
-    map_html, center = build_static_map(waypoints, obstacles)
-    st.session_state.static_map_html = map_html
-    st.session_state.map_center = center
 
 # 控制按钮
 col1, col2 = st.columns(2)
@@ -174,18 +197,10 @@ with col2:
             st.session_state.flight_task["active"] = False
             st.rerun()
 
-# 每秒刷新页面（只用于更新飞行指标和获取飞机位置）
-# 但地图 HTML 不会重新生成，所以地图不会闪烁
-st_autorefresh = __import__('streamlit_autorefresh').st_autorefresh
-# 为了避免导入错误，使用 try-except
-try:
-    from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=1000, key="flight_data")
-except:
-    time.sleep(1)
-    st.rerun()
+# 每秒自动刷新数据
+st_autorefresh(interval=1000, key="flight_monitor")
 
-# 更新飞行任务状态
+# 更新飞行状态
 if st.session_state.flight_task and st.session_state.flight_task.get("active"):
     update_flight_task(st.session_state.flight_task)
 
@@ -226,12 +241,9 @@ if task and task.get("waypoints"):
     # 左右布局：地图（左） + 通信链路（右）
     left_col, right_col = st.columns([2, 1])
     with left_col:
-        st.subheader("🗺️ 实时飞行地图（飞机移动，地图不闪烁）")
-        # 获取当前飞机位置
-        current_pos = get_current_position(task)
-        if current_pos and st.session_state.static_map_html:
-。
-            st.warning("由于技术限制，实时飞机移动会导致地图轻微闪烁。如需要完全不闪烁，请改用静态地图（飞机位置用数字显示）。")
+        st.subheader("🗺️ 实时飞行地图")
+        map_obj = create_flight_map(task, obstacles)
+        st_folium(map_obj, width=700, height=500, key="moving_map")
     with right_col:
         st.subheader("📡 通信链路拓扑与数据流")
         st.success("✅ GCS 在线")
@@ -241,5 +253,46 @@ if task and task.get("waypoints"):
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
-# ==================== 心跳模拟器 ====================
-# ... (保持不变)
+# ==================== 心跳模拟器（后台监控） ====================
+st.markdown("---")
+st.subheader("📶 无人机心跳模拟器（背景监控）")
+
+col_h1, col_h2 = st.columns(2)
+with col_h1:
+    if st.button("⏸️ 暂停心跳", use_container_width=True):
+        st.session_state.running = False
+        st.rerun()
+with col_h2:
+    if st.button("▶️ 开始心跳", use_container_width=True):
+        st.session_state.running = True
+        st.rerun()
+
+if st.session_state.running:
+    st.session_state.seq += 1
+    current_time = get_beijing_time_str()
+    battery = round(random.uniform(70, 100), 2)
+    signal = round(random.uniform(60, 95), 2)
+    temperature = round(random.uniform(20, 45), 1)
+    satellites = random.randint(6, 12)
+    st.session_state.heartbeat_data.append({
+        "序号": st.session_state.seq,
+        "时间": current_time,
+        "电池(%)": battery,
+        "信号(%)": signal,
+        "温度(°C)": temperature,
+        "卫星数": satellites
+    })
+    if len(st.session_state.heartbeat_data) > 60:
+        st.session_state.heartbeat_data.pop(0)
+
+df = pd.DataFrame(st.session_state.heartbeat_data)
+st.metric("累计心跳数", len(df))
+if not df.empty:
+    st.line_chart(df, x="时间", y="序号", color="#ff4560")
+    st.dataframe(df, use_container_width=True, height=200)
+else:
+    st.info("心跳数据等待中...")
+if st.session_state.running:
+    st.success("✅ 心跳运行中（每秒更新）")
+else:
+    st.warning("⏸️ 心跳已暂停")
