@@ -294,6 +294,8 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         
         # 绘制路径：折线/曲线区分显示
         folium.PolyLine(route, color=color, weight=5, opacity=1, popup="无人机航线").add_to(m)
+        
+        # 🔥 已删除：左右绕飞的黄色拐点标记，现在是纯折线！
 
     if len(temp_points) >= 3:
         ps = [[lat, lng] for lng, lat in temp_points]
@@ -327,30 +329,27 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 状态初始化（兼容旧会话，逐个初始化） ====================
-# 先加载保存的状态
-loaded = load_state()
-OFFICIAL_LNG, OFFICIAL_LAT = 118.749413, 32.234097
-# 所有状态的默认值
-defaults = {
-    "home_point": (OFFICIAL_LNG, OFFICIAL_LAT),
-    "land_point": (OFFICIAL_LNG + 0.0008, OFFICIAL_LAT + 0.0005),
-    "waypoints": [],
-    "coord_system": "gcj02",
-    "obstacles": [],
-    "draw_points": [],
-    "last_click": None,
-    "fly_mode": "左侧绕飞",
-    "map_zoom": 19,
-    "map_center": (OFFICIAL_LNG, OFFICIAL_LAT)
-}
-# 逐个初始化，兼容旧会话
-for k, v in defaults.items():
-    if loaded and k in loaded:
-        if k not in st.session_state:
+# ==================== 初始化 ====================
+if "home_point" not in st.session_state:
+    loaded = load_state()
+    OFFICIAL_LNG, OFFICIAL_LAT = 118.749413, 32.234097
+    defaults = {
+        "home_point": (OFFICIAL_LNG, OFFICIAL_LAT),
+        "land_point": (OFFICIAL_LNG + 0.0008, OFFICIAL_LAT + 0.0005),
+        "waypoints": [],
+        "coord_system": "gcj02",
+        "obstacles": [],
+        "draw_points": [],
+        "last_click": None,
+        "fly_mode": "左侧绕飞",
+        "map_zoom": 19,
+        "map_center": (OFFICIAL_LNG, OFFICIAL_LAT)
+    }
+    for k, v in defaults.items():
+        if loaded and k in loaded:
             st.session_state[k] = loaded[k]
-    elif k not in st.session_state:
-        st.session_state[k] = v
+        else:
+            st.session_state[k] = v
 
 # ==================== 侧边栏 ====================
 with st.sidebar:
@@ -387,11 +386,6 @@ with st.sidebar:
     st.subheader("✈️ 航线")
     if st.button("生成航线"):
         st.session_state.waypoints = [st.session_state.home_point, st.session_state.land_point]
-        # 重置飞行监控的位置，避免旧状态影响
-        if "path_idx" in st.session_state:
-            st.session_state.path_idx = 0
-        if "uav_pos" in st.session_state:
-            st.session_state.uav_pos = st.session_state.home_point
         save_state()
         st.rerun()
     if st.button("清空航线"):
@@ -455,13 +449,11 @@ if output and output.get("center") and output.get("zoom"):
     st.session_state.map_center = (output["center"]["lng"], output["center"]["lat"])
     st.session_state.map_zoom = output["zoom"]
 
-# 安全获取last_click，避免报错
-last_click = st.session_state.get("last_click")
 if output and output.get("last_clicked"):
     lat = output["last_clicked"]["lat"]
     lng = output["last_clicked"]["lng"]
     pt = (round(lng, 6), round(lat, 6))
-    if last_click != pt:
+    if st.session_state.last_click != pt:
         st.session_state.last_click = pt
         st.session_state.draw_points.append(pt)
         save_state()
