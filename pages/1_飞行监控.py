@@ -197,8 +197,8 @@ with col2:
             st.session_state.flight_task["active"] = False
             st.rerun()
 
-# 每秒自动刷新数据
-st_autorefresh(interval=1000, key="flight_monitor")
+# 降低刷新频率：每 2 秒刷新一次，减少闪烁，便于看清航线
+st_autorefresh(interval=2000, key="flight_monitor")
 
 # 更新飞行状态
 if st.session_state.flight_task and st.session_state.flight_task.get("active"):
@@ -241,7 +241,7 @@ if task and task.get("waypoints"):
     # 左右布局：地图（左） + 通信链路（右）
     left_col, right_col = st.columns([2, 1])
     with left_col:
-        st.subheader("🗺️ 实时飞行地图")
+        st.subheader("🗺️ 实时飞行地图（每2秒刷新一次）")
         map_obj = create_flight_map(task, obstacles)
         st_folium(map_obj, width=700, height=500, key="moving_map")
     with right_col:
@@ -249,7 +249,7 @@ if task and task.get("waypoints"):
         st.success("✅ GCS 在线")
         st.success("✅ OBC 在线")
         st.success("✅ FCU 在线")
-        st.caption("数据链路正常 • 心跳间隔1s")
+        st.caption("数据链路正常 • 心跳间隔1s（后台）")
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
