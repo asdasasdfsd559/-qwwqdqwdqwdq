@@ -25,14 +25,11 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def simplify_waypoints_for_display(waypoints, max_points=15):
-    """简化航点用于显示，保留起点、终点和中间均匀采样的点"""
+def simplify_waypoints(waypoints, max_points=15):
     if len(waypoints) <= max_points:
         return waypoints
-    # 均匀采样
     step = (len(waypoints) - 1) / (max_points - 1)
     indices = [int(round(i * step)) for i in range(max_points)]
-    # 确保最后一个点包含
     if indices[-1] != len(waypoints) - 1:
         indices[-1] = len(waypoints) - 1
     return [waypoints[i] for i in indices]
@@ -108,7 +105,6 @@ def create_flight_map(task, obstacles):
             center = [task["waypoints"][0][1], task["waypoints"][0][0]]
         m = folium.Map(location=center, zoom_start=18, control_scale=True)
 
-    # 底图
     folium.TileLayer(
         tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
         attr='高德-街道', name='街道图'
@@ -118,57 +114,52 @@ def create_flight_map(task, obstacles):
         attr='高德-卫星', name='卫星图'
     ).add_to(m)
 
-    # 障碍物（红色）
     for ob in obstacles:
         points = [[p[1], p[0]] for p in ob['points']]
         folium.Polygon(locations=points, color='red', fill=True, fill_opacity=0.5, popup=ob['name']).add_to(m)
 
-    # 规划航线（蓝色）
     waypoints = task["waypoints"]
     route = [[lat, lng] for lng, lat in waypoints]
     folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
 
-    # 显示简化后的航点（蓝色小圆点）—— 只显示关键点，避免过多
-    display_waypoints = simplify_waypoints_for_display(waypoints, max_points=15)
-    for i, (lng, lat) in enumerate(display_waypoints):
+    # 显示简化的航点（小圆点）
+    display_pts = simplify_waypoints(waypoints, max_points=15)
+    for i, (lng, lat) in enumerate(display_pts):
         folium.CircleMarker(
             location=[lat, lng],
-            radius=4,
+            radius=3,
             color='blue',
             fill=True,
             fill_color='blue',
-            fill_opacity=0.7,
+            fill_opacity=0.6,
             popup=f"航点 {i+1}"
         ).add_to(m)
 
-    # 已飞路径（绿色）
+    # 已飞路径
     flown_dist = task["flown_distance"]
     if flown_dist > 0:
         flown_points = []
-        cumulative = 0.0
+        cum = 0.0
         segs = task["seg_distances"]
         for i, d in enumerate(segs):
-            if cumulative + d <= flown_dist:
+            if cum + d <= flown_dist:
                 flown_points.append(waypoints[i])
                 flown_points.append(waypoints[i+1])
             else:
-                ratio = (flown_dist - cumulative) / d if d > 0 else 1.0
-                w1 = waypoints[i]
-                w2 = waypoints[i+1]
+                ratio = (flown_dist - cum) / d if d > 0 else 1.0
+                w1, w2 = waypoints[i], waypoints[i+1]
                 interp = (w1[0] + (w2[0]-w1[0])*ratio, w1[1] + (w2[1]-w1[1])*ratio)
                 flown_points.append(w1)
                 flown_points.append(interp)
                 break
-            cumulative += d
-        unique_flown = []
+            cum += d
+        unique = []
         for p in flown_points:
-            if not unique_flown or (p[0] != unique_flown[-1][0] or p[1] != unique_flown[-1][1]):
-                unique_flown.append(p)
-        if len(unique_flown) >= 2:
-            flown_route = [[lat, lng] for lng, lat in unique_flown]
-            folium.PolyLine(flown_route, color='green', weight=4, opacity=0.9, popup="已飞路径").add_to(m)
+            if not unique or (p[0] != unique[-1][0] or p[1] != unique[-1][1]):
+                unique.append(p)
+        if len(unique) >= 2:
+            folium.PolyLine([[lat, lng] for lng, lat in unique], color='green', weight=4, opacity=0.9, popup="已飞路径").add_to(m)
 
-    # 无人机当前位置（红色飞机图标）
     current_pos = get_current_position(task)
     if current_pos:
         folium.Marker(
@@ -177,7 +168,6 @@ def create_flight_map(task, obstacles):
             popup=f"当前位置 ({current_pos[0]:.6f}, {current_pos[1]:.6f})"
         ).add_to(m)
 
-    # 起点和终点
     folium.Marker([waypoints[0][1], waypoints[0][0]], icon=folium.Icon(color='green', icon='play'), popup="起飞点").add_to(m)
     folium.Marker([waypoints[-1][1], waypoints[-1][0]], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
@@ -187,7 +177,6 @@ def create_flight_map(task, obstacles):
 # ==================== 页面主体 ====================
 st.header("🚁 飞行实时画面 - 任务执行监控")
 
-# 初始化状态
 if "flight_task" not in st.session_state:
     st.session_state.flight_task = None
 if "heartbeat_data" not in st.session_state:
@@ -195,27 +184,22 @@ if "heartbeat_data" not in st.session_state:
     st.session_state.seq = 0
     st.session_state.running = True
 
-# 获取最新的航点和障碍物
 waypoints = st.session_state.get("flight_waypoints", [])
 obstacles = st.session_state.get("obstacles", [])
 
-# 自动检测航点变化，如果变化则重新初始化飞行任务
 if st.session_state.flight_task is not None:
-    old_waypoints = st.session_state.flight_task.get("waypoints")
-    if old_waypoints != waypoints:
+    if st.session_state.flight_task.get("waypoints") != waypoints:
         st.session_state.flight_task = None
 
 if st.session_state.flight_task is None and waypoints and len(waypoints) >= 2:
     st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
 
-# 手动重载航线按钮
-col_btn1, col_btn2 = st.columns([1, 5])
-with col_btn1:
+col_btn, _ = st.columns([1, 5])
+with col_btn:
     if st.button("🔄 重新加载航线", use_container_width=True):
         st.session_state.flight_task = None
         st.rerun()
 
-# 控制按钮
 col1, col2 = st.columns(2)
 with col1:
     if st.button("▶️ 开始任务", use_container_width=True):
@@ -234,14 +218,11 @@ with col2:
             st.session_state.flight_task["active"] = False
             st.rerun()
 
-# 每2秒自动刷新数据（地图会重绘，但频率低）
 st_autorefresh(interval=2000, key="flight_monitor")
 
-# 更新飞行状态
 if st.session_state.flight_task and st.session_state.flight_task.get("active"):
     update_flight_task(st.session_state.flight_task)
 
-# 显示飞行指标
 task = st.session_state.flight_task
 if task and task.get("waypoints"):
     total_wp = len(task["waypoints"])
@@ -275,7 +256,6 @@ if task and task.get("waypoints"):
     st.progress(progress/100.0, text=f"飞行进度 {progress:.1f}%")
     st.markdown("---")
 
-    # 左右布局：地图（左） + 通信链路与航点列表（右）
     left_col, right_col = st.columns([2, 1])
     with left_col:
         st.subheader("🗺️ 实时飞行地图（每2秒刷新一次）")
@@ -289,21 +269,20 @@ if task and task.get("waypoints"):
         st.caption("数据链路正常 • 心跳间隔1s（后台）")
         st.markdown("---")
         st.subheader("📍 航点列表")
-        # 显示简化后的航点（避免列表过长）
-        display_waypoints = simplify_waypoints_for_display(task["waypoints"], max_points=15)
-        for i, (lng, lat) in enumerate(display_waypoints):
+        display_pts = simplify_waypoints(task["waypoints"], max_points=15)
+        for i, (lng, lat) in enumerate(display_pts):
             if i == 0:
                 st.caption(f"✈️ 起点 ({lng:.6f}, {lat:.6f})")
-            elif i == len(display_waypoints)-1:
+            elif i == len(display_pts)-1:
                 st.caption(f"🏁 终点 ({lng:.6f}, {lat:.6f})")
             else:
                 st.caption(f"📍 航点 {i+1}: ({lng:.6f}, {lat:.6f})")
-        if len(task["waypoints"]) > len(display_waypoints):
+        if len(task["waypoints"]) > len(display_pts):
             st.caption(f"... 共 {len(task['waypoints'])} 个航点，仅显示关键点")
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
-# ==================== 心跳模拟器（后台监控） ====================
+# ==================== 心跳模拟器 ====================
 st.markdown("---")
 st.subheader("📶 无人机心跳模拟器（背景监控）")
 
