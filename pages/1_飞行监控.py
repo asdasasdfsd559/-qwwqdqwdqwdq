@@ -207,6 +207,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         folium.Polygon(locations=ps, color='red', fill=True, fill_opacity=0.5, popup=f"{ob['name']}").add_to(m)
 
     # 绘制航线
+    safe_path = []
     if len(waypoints) >= 2:
         safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode)
         st.session_state.safe_path = safe_path  # 保存路径用于无人机移动
@@ -241,7 +242,7 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
         folium.CircleMarker([lat, lng], radius=4, color='red', fill=True).add_to(m)
 
     folium.LayerControl().add_to(m)
-    return m
+    return m, safe_path
 
 # ==================== 时间工具 ====================
 BEIJING_TZ = timezone(timedelta(hours=8))
@@ -251,27 +252,41 @@ def get_beijing_time_str():
 # ==================== 页面配置 ====================
 st.set_page_config(page_title="飞行监控", layout="wide")
 
-# ==================== 状态初始化 ====================
+# ==================== 状态初始化（兼容旧会话，逐个初始化避免遗漏） ====================
+# 心跳状态
 if "heartbeat_data" not in st.session_state:
     st.session_state.heartbeat_data = []
+if "seq" not in st.session_state:
     st.session_state.seq = 0
+if "running" not in st.session_state:
     st.session_state.running = True
-    # 无人机飞行状态
-    OFFICIAL_LNG, OFFICIAL_LAT = 118.749413, 32.234097
-    st.session_state.uav_pos = st.session_state.get("home_point", (OFFICIAL_LNG, OFFICIAL_LAT))
-    st.session_state.path_idx = 0
-    st.session_state.last_battery = 96.0
 
-# 初始化默认的航线规划状态（如果用户还没去过航线规划页面）
+# 无人机飞行状态
+if "last_battery" not in st.session_state:
+    st.session_state.last_battery = 96.0
+OFFICIAL_LNG, OFFICIAL_LAT = 118.749413, 32.234097
+if "uav_pos" not in st.session_state:
+    st.session_state.uav_pos = st.session_state.get("home_point", (OFFICIAL_LNG, OFFICIAL_LAT))
+if "path_idx" not in st.session_state:
+    st.session_state.path_idx = 0
+
+# 航线规划状态（用户未访问过航线规划页面时的默认值）
 if "waypoints" not in st.session_state:
-    OFFICIAL_LNG, OFFICIAL_LAT = 118.749413, 32.234097
     st.session_state.waypoints = []
+if "home_point" not in st.session_state:
     st.session_state.home_point = (OFFICIAL_LNG, OFFICIAL_LAT)
+if "land_point" not in st.session_state:
     st.session_state.land_point = (OFFICIAL_LNG + 0.0008, OFFICIAL_LAT + 0.0005)
+if "coord_system" not in st.session_state:
     st.session_state.coord_system = "gcj02"
+if "obstacles" not in st.session_state:
     st.session_state.obstacles = []
+if "fly_mode" not in st.session_state:
     st.session_state.fly_mode = "弧线最短航线"
+if "draw_points" not in st.session_state:
     st.session_state.draw_points = []
+if "safe_path" not in st.session_state:
+    st.session_state.safe_path = []
 
 # ==================== 页面标题 ====================
 st.header("📡 飞行监控（自动每秒心跳，可暂停）")
@@ -291,12 +306,13 @@ with col2:
 st_autorefresh(interval=1000, key="heartbeat_auto")
 
 # ==================== 数据更新（运行时） ====================
-current_battery = st.session_state.last_battery
+# 安全获取状态，避免报错
+current_battery = st.session_state.get("last_battery", 96.0)
 current_signal = 90
 current_temp = 28
 current_sat = 10
 safe_path = st.session_state.get("safe_path", [])
-path_idx = st.session_state.path_idx
+path_idx = st.session_state.get("path_idx", 0)
 
 if st.session_state.running:
     st.session_state.seq += 1
@@ -360,7 +376,7 @@ with col_map:
     
     # 绘制地图
     center = st.session_state.uav_pos
-    m = create_map(
+    m, safe_path = create_map(
         center[0], center[1],
         st.session_state.waypoints,
         st.session_state.home_point,
@@ -371,6 +387,7 @@ with col_map:
         st.session_state.fly_mode,
         st.session_state.uav_pos
     )
+    st.session_state.safe_path = safe_path
     st_folium(m, width=1100, height=500, key="monitor_map")
 
 with col_comm:
