@@ -116,6 +116,18 @@ def create_flight_map(task, obstacles):
     route = [[lat, lng] for lng, lat in waypoints]
     folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
 
+    # 显示每个航点（蓝色小圆点）
+    for i, (lng, lat) in enumerate(waypoints):
+        folium.CircleMarker(
+            location=[lat, lng],
+            radius=5,
+            color='blue',
+            fill=True,
+            fill_color='blue',
+            fill_opacity=0.8,
+            popup=f"航点 {i+1}"
+        ).add_to(m)
+
     # 已飞路径（绿色）
     flown_dist = task["flown_distance"]
     if flown_dist > 0:
@@ -248,7 +260,7 @@ if task and task.get("waypoints"):
     st.progress(progress/100.0, text=f"飞行进度 {progress:.1f}%")
     st.markdown("---")
 
-    # 左右布局：地图（左） + 通信链路（右）
+    # 左右布局：地图（左） + 通信链路与航点列表（右）
     left_col, right_col = st.columns([2, 1])
     with left_col:
         st.subheader("🗺️ 实时飞行地图（每2秒刷新一次）")
@@ -260,6 +272,11 @@ if task and task.get("waypoints"):
         st.success("✅ OBC 在线")
         st.success("✅ FCU 在线")
         st.caption("数据链路正常 • 心跳间隔1s（后台）")
+        st.markdown("---")
+        st.subheader("📍 航点列表")
+        # 显示所有航点坐标
+        for i, (lng, lat) in enumerate(task["waypoints"]):
+            st.caption(f"航点 {i+1}: ({lng:.6f}, {lat:.6f})")
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
