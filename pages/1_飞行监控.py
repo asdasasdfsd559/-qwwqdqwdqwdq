@@ -170,13 +170,23 @@ if "heartbeat_data" not in st.session_state:
     st.session_state.seq = 0
     st.session_state.running = True
 
-# 从航线规划中获取航点和障碍物
+# 获取最新的航点和障碍物
 waypoints = st.session_state.get("flight_waypoints", [])
 obstacles = st.session_state.get("obstacles", [])
 
-# 初始化飞行任务
+# 自动检测航点变化，如果变化则重新初始化飞行任务
+if st.session_state.flight_task is not None:
+    old_waypoints = st.session_state.flight_task.get("waypoints")
+    if old_waypoints != waypoints:
+        st.session_state.flight_task = None
+
 if st.session_state.flight_task is None and waypoints and len(waypoints) >= 2:
     st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
+
+# 手动重载航线按钮
+if st.button("🔄 重新加载航线", use_container_width=False):
+    st.session_state.flight_task = None
+    st.rerun()
 
 # 控制按钮
 col1, col2 = st.columns(2)
@@ -197,7 +207,7 @@ with col2:
             st.session_state.flight_task["active"] = False
             st.rerun()
 
-# 降低刷新频率：每 2 秒刷新一次，减少闪烁，便于看清航线
+# 每2秒自动刷新数据（地图会重绘，但频率低）
 st_autorefresh(interval=2000, key="flight_monitor")
 
 # 更新飞行状态
