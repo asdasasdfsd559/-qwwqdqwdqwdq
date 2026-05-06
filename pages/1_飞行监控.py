@@ -1,32 +1,47 @@
 import streamlit as st
 import pandas as pd
-import time
 import math
 import random
+import time
 from datetime import datetime, timezone, timedelta
+import folium
+from streamlit_folium import st_folium
 from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="飞行监控", layout="wide")
 
-# 北京时间
+# ==================== 辅助函数 ====================
 BEIJING_TZ = timezone(timedelta(hours=8))
 def get_beijing_time_str():
     return datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
 
-# ------------------ 辅助函数：计算两点间距离（米）采用haversine公式 ------------------
 def haversine(lon1, lat1, lon2, lat2):
-    R = 6371000  # 地球半径（米）
+    """计算两点距离（米）"""
+    R = 6371000
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
     delta_lambda = math.radians(lon2 - lon1)
     a = math.sin(delta_phi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(delta_lambda/2)**2
-    c = 2*math.atan2(math.sqrt(a), math.sqrt(1-a))
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-# ------------------ 飞行任务模拟 ------------------
-def init_flight(waypoints, speed=8.5):
-    """初始化飞行任务，计算各段距离和总距离"""
+def interpolate_position(waypoints, seg_distances, flown):
+    """根据已飞距离（米）计算当前经纬度（线性插值）"""
+    cumulative = 0.0
+    for i, d in enumerate(seg_distances):
+        if cumulative + d >= flown:
+            ratio = (flown - cumulative) / d if d > 0 else 1.0
+            w1 = waypoints[i]
+            w2 = waypoints[i+1]
+            lng = w1[0] + (w2[0] - w1[0]) * ratio
+            lat = w1[1] + (w2[1] - w1[1]) * ratio
+            return (lng, lat), i
+        cumulative += d
+    return waypoints[-1], len(waypoints)-2
+
+# ==================== 初始化飞行任务 ====================
+def init_flight_task(waypoints, speed=8.5):
     if not waypoints or len(waypoints) < 2:
         return None
     seg_distances = []
@@ -41,121 +56,207 @@ def init_flight(waypoints, speed=8.5):
         "total_distance": total,
         "speed": speed,
         "start_time": None,
-        "active": False
+        "active": False,
+        "flown_distance": 0.0,
+        "current_position": waypoints[0],
+        "current_seg_idx": 0,
+        "completion": 0.0
     }
 
-def update_flight_progress(flight_state):
-    """根据当前时间更新飞行进度，返回 (当前航点索引, 当前航段进度比例, 已飞距离, 已用时间, 剩余距离, 预计剩余时间)"""
-    if not flight_state or not flight_state["active"]:
-        return None
-    elapsed = time.time() - flight_state["start_time"]
-    flown = flight_state["speed"] * elapsed
-    total = flight_state["total_distance"]
-    if flown >= total:
-        # 任务完成
-        flight_state["active"] = False
-        return (len(flight_state["waypoints"])-1, 1.0, total, elapsed, 0.0, 0.0)
-    # 找到当前航段
-    cum = 0.0
-    seg_idx = 0
-    for i, d in enumerate(flight_state["seg_distances"]):
-        if cum + d >= flown:
-            seg_idx = i
-            break
-        cum += d
-    seg_progress = (flown - cum) / flight_state["seg_distances"][seg_idx] if flight_state["seg_distances"][seg_idx] > 0 else 1.0
-    remaining = total - flown
-    eta = remaining / flight_state["speed"]
-    return (seg_idx, seg_progress, flown, elapsed, remaining, eta)
+def update_flight(task):
+    if not task or not task["active"]:
+        return
+    elapsed = time.time() - task["start_time"]
+    flown = task["speed"] * elapsed
+    if flown >= task["total_distance"]:
+        task["active"] = False
+        task["flown_distance"] = task["total_distance"]
+        task["current_position"] = task["waypoints"][-1]
+        task["completion"] = 1.0
+        return
+    task["flown_distance"] = flown
+    task["completion"] = flown / task["total_distance"]
+    cumulative = 0.0
+    for i, d in enumerate(task["seg_distances"]):
+        if cumulative + d >= flown:
+            task["current_seg_idx"] = i
+            ratio = (flown - cumulative) / d if d > 0 else 1.0
+            w1 = task["waypoints"][i]
+            w2 = task["waypoints"][i+1]
+            lng = w1[0] + (w2[0] - w1[0]) * ratio
+            lat = w1[1] + (w2[1] - w1[1]) * ratio
+            task["current_position"] = (lng, lat)
+            return
+        cumulative += d
 
-# 初始化 session_state 中的飞行任务
-if "flight_task" not in st.session_state:
-    st.session_state.flight_task = None
+# ==================== 创建实时飞行地图 ====================
+def create_flight_map(task):
+    if not task or not task["waypoints"]:
+        m = folium.Map(location=[32.234097, 118.749413], zoom_start=16, control_scale=True)
+        folium.TileLayer(
+            tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+            attr='高德-街道', name='街道图'
+        ).add_to(m)
+        folium.TileLayer(
+            tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+            attr='高德-卫星', name='卫星图'
+        ).add_to(m)
+        folium.LayerControl().add_to(m)
+        return m
 
+    waypoints = task["waypoints"]
+    route = [[lat, lng] for lng, lat in waypoints]
+    current_pos = task["current_position"]
+    center = current_pos[::-1] if current_pos else [32.234097, 118.749413]
+    m = folium.Map(location=center, zoom_start=18, control_scale=True)
+
+    folium.TileLayer(
+        tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
+        attr='高德-街道', name='街道图'
+    ).add_to(m)
+    folium.TileLayer(
+        tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
+        attr='高德-卫星', name='卫星图'
+    ).add_to(m)
+
+    # 规划航线（蓝色）
+    folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
+
+    # 已飞路径（绿色）
+    flown_dist = task["flown_distance"]
+    if flown_dist > 0:
+        flown_points = []
+        cum = 0.0
+        segs = task["seg_distances"]
+        for i, d in enumerate(segs):
+            if cum + d <= flown_dist:
+                flown_points.append(waypoints[i])
+                flown_points.append(waypoints[i+1])
+            else:
+                ratio = (flown_dist - cum) / d if d > 0 else 1.0
+                w1 = waypoints[i]
+                w2 = waypoints[i+1]
+                interp = (w1[0] + (w2[0]-w1[0])*ratio, w1[1] + (w2[1]-w1[1])*ratio)
+                flown_points.append(w1)
+                flown_points.append(interp)
+                break
+            cum += d
+        unique_flown = []
+        for p in flown_points:
+            if not unique_flown or (p[0] != unique_flown[-1][0] or p[1] != unique_flown[-1][1]):
+                unique_flown.append(p)
+        if len(unique_flown) >= 2:
+            flown_route = [[lat, lng] for lng, lat in unique_flown]
+            folium.PolyLine(flown_route, color='green', weight=4, opacity=0.9, popup="已飞路径").add_to(m)
+
+    # 无人机当前位置（红色飞机图标）
+    folium.Marker(
+        location=[current_pos[1], current_pos[0]],
+        icon=folium.Icon(color='red', icon='plane', prefix='fa'),
+        popup=f"当前位置 ({current_pos[0]:.6f}, {current_pos[1]:.6f})"
+    ).add_to(m)
+
+    # 起点和终点
+    folium.Marker([waypoints[0][1], waypoints[0][0]], icon=folium.Icon(color='green', icon='play'), popup="起飞点").add_to(m)
+    folium.Marker([waypoints[-1][1], waypoints[-1][0]], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
+
+    folium.LayerControl().add_to(m)
+    return m
+
+# ==================== 页面主体 ====================
 st.header("🚁 飞行实时画面 - 任务执行监控")
 
 # 获取航线规划中保存的航点
 waypoints = st.session_state.get("flight_waypoints", [])
-if waypoints and len(waypoints) >= 2 and (st.session_state.flight_task is None or st.session_state.flight_task["waypoints"] != waypoints):
-    # 如果航点更新了，重新初始化任务（但不自动激活）
-    st.session_state.flight_task = init_flight(waypoints, speed=8.5)
 
-col1, col2 = st.columns([1, 3])
+# 初始化或更新飞行任务
+if "flight_task" not in st.session_state or st.session_state.flight_task is None:
+    if waypoints and len(waypoints) >= 2:
+        st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
+elif st.session_state.flight_task and st.session_state.flight_task["waypoints"] != waypoints:
+    st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
+
+# 控制按钮
+col1, col2 = st.columns(2)
 with col1:
     if st.button("▶️ 开始任务", use_container_width=True):
         if st.session_state.flight_task and len(st.session_state.flight_task["waypoints"]) >= 2:
             st.session_state.flight_task["active"] = True
             st.session_state.flight_task["start_time"] = time.time()
+            st.session_state.flight_task["flown_distance"] = 0.0
+            st.session_state.flight_task["current_position"] = st.session_state.flight_task["waypoints"][0]
             st.rerun()
         else:
             st.warning("请先在「航线规划」页面生成飞行航线")
+with col2:
     if st.button("⏹️ 停止任务", use_container_width=True):
         if st.session_state.flight_task:
             st.session_state.flight_task["active"] = False
             st.rerun()
 
-# 每秒自动刷新页面（用于更新实时数据）
+# 每秒自动刷新页面
 st_autorefresh(interval=1000, key="flight_monitor")
 
-# 显示实时监控数据
-if st.session_state.flight_task:
-    task = st.session_state.flight_task
-    progress_info = update_flight_progress(task)
-    if progress_info:
-        seg_idx, seg_progress, flown, elapsed, remaining, eta = progress_info
-        total = task["total_distance"]
-        # 计算当前航点
-        current_wp = seg_idx + 1
-        total_wp = len(task["waypoints"])
-        # 格式化时间
-        def format_time(sec):
-            m = int(sec // 60)
-            s = int(sec % 60)
-            return f"{m:02d}:{s:02d}"
-        elapsed_str = format_time(elapsed)
-        eta_str = format_time(eta) if eta > 0 else "00:00"
-        # 电量模拟（根据飞行比例下降，最低 5%）
-        battery = max(5, 100 - (flown / total) * 95)
-        # 进度百分比
-        progress_pct = (flown / total) * 100 if total > 0 else 0
+# 更新飞行任务状态
+if st.session_state.flight_task and st.session_state.flight_task["active"]:
+    update_flight(st.session_state.flight_task)
 
-        # 布局显示
-        col_a, col_b, col_c = st.columns(3)
-        with col_a:
-            st.metric("📌 当前航点", f"{current_wp} / {total_wp}")
-            st.metric("⚡ 飞行速度", f"{task['speed']:.1f} m/s")
-        with col_b:
-            st.metric("⏱️ 已用时间", elapsed_str)
-            st.metric("📏 剩余距离", f"{remaining:.0f} m")
-        with col_c:
-            st.metric("🕒 预计到达", eta_str)
-            st.metric("🔋 电量模拟", f"{battery:.1f}%", delta=None)
+# 显示监控指标
+task = st.session_state.flight_task
+if task and task["waypoints"]:
+    total_wp = len(task["waypoints"])
+    current_seg = task["current_seg_idx"] + 1
+    progress = task["completion"] * 100
+    elapsed = time.time() - task["start_time"] if task["active"] and task["start_time"] else 0
+    if not task["active"] and task["completion"] >= 1.0:
+        elapsed = task["total_distance"] / task["speed"]
+    remaining_dist = max(0, task["total_distance"] - task["flown_distance"])
+    remaining_time = remaining_dist / task["speed"] if task["speed"] > 0 else 0
+    battery = max(5, 100 - progress * 0.95)
 
-        # 进度条
-        st.progress(progress_pct / 100.0, text=f"飞行进度 {progress_pct:.1f}%")
+    def fmt_time(sec):
+        m = int(sec // 60)
+        s = int(sec % 60)
+        return f"{m:02d}:{s:02d}"
+    elapsed_str = fmt_time(elapsed)
+    eta_str = fmt_time(remaining_time)
 
-        # 通信链路拓扑
-        st.subheader("📡 通信链路拓扑与数据流")
-        link_cols = st.columns(3)
-        link_cols[0].success("✅ GCS 在线")
-        link_cols[1].success("✅ OBC 在线")
-        link_cols[2].success("✅ FCU 在线")
+    st.markdown("---")
+    mcol1, mcol2, mcol3 = st.columns(3)
+    with mcol1:
+        st.metric("📌 当前航点", f"{current_seg} / {total_wp}")
+        st.metric("⚡ 飞行速度", f"{task['speed']:.1f} m/s")
+    with mcol2:
+        st.metric("⏱️ 已用时间", elapsed_str)
+        st.metric("📏 剩余距离", f"{remaining_dist:.0f} m")
+    with mcol3:
+        st.metric("🕒 预计到达", eta_str)
+        st.metric("🔋 电量模拟", f"{battery:.1f}%")
+    st.progress(progress/100.0, text=f"飞行进度 {progress:.1f}%")
+    st.markdown("---")
 
-        # 显示当前航点坐标（可选）
-        with st.expander("📍 航点坐标详情"):
-            st.write("起飞点 → 降落点路径点（经纬度）")
-            for i, wp in enumerate(task["waypoints"]):
-                st.caption(f"航点 {i}: ({wp[0]:.6f}, {wp[1]:.6f})")
-    else:
-        if not task["active"]:
-            st.info("飞行任务未启动，点击「开始任务」开始模拟飞行")
+    # 通信链路拓扑
+    st.subheader("📡 通信链路拓扑与数据流")
+    link_cols = st.columns(3)
+    # 模拟链路状态（可根据实际需求改为固定在线）
+    gcs_status = "✅ GCS 在线" if random.random() > 0.05 else "❌ GCS 离线"
+    obc_status = "✅ OBC 在线" if random.random() > 0.05 else "❌ OBC 离线"
+    fcu_status = "✅ FCU 在线" if random.random() > 0.05 else "❌ FCU 离线"
+    link_cols[0].success(gcs_status) if "✅" in gcs_status else link_cols[0].error(gcs_status)
+    link_cols[1].success(obc_status) if "✅" in obc_status else link_cols[1].error(obc_status)
+    link_cols[2].success(fcu_status) if "✅" in fcu_status else link_cols[2].error(fcu_status)
+    st.markdown("---")
+
+    # 实时飞行地图
+    st.subheader("🗺️ 实时飞行地图")
+    map_obj = create_flight_map(task)
+    st_folium(map_obj, width=1100, height=500, key="real_time_map")
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
-# ------------------ 保留原有的心跳模拟模块（可选） ------------------
+# ------------------ 原有心跳模拟器（保留） ------------------
 st.markdown("---")
 st.subheader("📶 无人机心跳模拟器（背景监控）")
-
 if "heartbeat_data" not in st.session_state:
     st.session_state.heartbeat_data = []
     st.session_state.seq = 0
@@ -171,7 +272,6 @@ with col_h2:
         st.session_state.running = True
         st.rerun()
 
-# 心跳自动刷新（与飞行监控共用同一个 autorefresh，但数据独立）
 if st.session_state.running:
     st.session_state.seq += 1
     current_time = get_beijing_time_str()
