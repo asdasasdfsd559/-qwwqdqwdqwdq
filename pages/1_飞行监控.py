@@ -42,12 +42,11 @@ def init_flight_task(waypoints, speed=8.5):
         "start_time": None,
         "active": False,
         "flown_distance": 0.0,
-        "current_position": waypoints[0],
         "current_seg_idx": 0,
         "completion": 0.0
     }
 
-def update_flight(task):
+def update_flight_task(task):
     if not task or not task["active"]:
         return
     elapsed = time.time() - task["start_time"]
@@ -55,7 +54,6 @@ def update_flight(task):
     if flown >= task["total_distance"]:
         task["active"] = False
         task["flown_distance"] = task["total_distance"]
-        task["current_position"] = task["waypoints"][-1]
         task["completion"] = 1.0
         return
     task["flown_distance"] = flown
@@ -64,35 +62,38 @@ def update_flight(task):
     for i, d in enumerate(task["seg_distances"]):
         if cumulative + d >= flown:
             task["current_seg_idx"] = i
+            return
+        cumulative += d
+
+def get_current_position(task):
+    if not task or not task["active"] and task["completion"] == 0:
+        return task["waypoints"][0] if task else None
+    flown = task["flown_distance"]
+    cumulative = 0.0
+    for i, d in enumerate(task["seg_distances"]):
+        if cumulative + d >= flown:
             ratio = (flown - cumulative) / d if d > 0 else 1.0
             w1 = task["waypoints"][i]
             w2 = task["waypoints"][i+1]
             lng = w1[0] + (w2[0] - w1[0]) * ratio
             lat = w1[1] + (w2[1] - w1[1]) * ratio
-            task["current_position"] = (lng, lat)
-            return
+            return (lng, lat)
         cumulative += d
+    return task["waypoints"][-1]
 
 def create_flight_map(task):
+    """生成以飞机当前位置为中心的地图"""
     if not task or not task["waypoints"]:
         m = folium.Map(location=[32.234097, 118.749413], zoom_start=16, control_scale=True)
-        folium.TileLayer(
-            tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-            attr='高德-街道', name='街道图'
-        ).add_to(m)
-        folium.TileLayer(
-            tiles='https://webst02.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}',
-            attr='高德-卫星', name='卫星图'
-        ).add_to(m)
-        folium.LayerControl().add_to(m)
-        return m
+    else:
+        current_pos = get_current_position(task)
+        if current_pos:
+            center = [current_pos[1], current_pos[0]]
+        else:
+            center = [task["waypoints"][0][1], task["waypoints"][0][0]]
+        m = folium.Map(location=center, zoom_start=18, control_scale=True)
 
-    waypoints = task["waypoints"]
-    route = [[lat, lng] for lng, lat in waypoints]
-    current_pos = task["current_position"]
-    center = current_pos[::-1] if current_pos else [32.234097, 118.749413]
-    m = folium.Map(location=center, zoom_start=18, control_scale=True)
-
+    # 底图
     folium.TileLayer(
         tiles='https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
         attr='高德-街道', name='街道图'
@@ -103,27 +104,30 @@ def create_flight_map(task):
     ).add_to(m)
 
     # 规划航线（蓝色）
+    route = [[lat, lng] for lng, lat in task["waypoints"]]
     folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
 
-    # 已飞路径（绿色）
-    flown_dist = task["flown_distance"]
-    if flown_dist > 0:
+    # 已飞路径（绿色，动态计算）
+    flown = task["flown_distance"]
+    if flown > 0:
         flown_points = []
-        cum = 0.0
+        cumulative = 0.0
+        waypoints = task["waypoints"]
         segs = task["seg_distances"]
         for i, d in enumerate(segs):
-            if cum + d <= flown_dist:
+            if cumulative + d <= flown:
                 flown_points.append(waypoints[i])
                 flown_points.append(waypoints[i+1])
             else:
-                ratio = (flown_dist - cum) / d if d > 0 else 1.0
+                ratio = (flown - cumulative) / d if d > 0 else 1.0
                 w1 = waypoints[i]
                 w2 = waypoints[i+1]
                 interp = (w1[0] + (w2[0]-w1[0])*ratio, w1[1] + (w2[1]-w1[1])*ratio)
                 flown_points.append(w1)
                 flown_points.append(interp)
                 break
-            cum += d
+            cumulative += d
+        # 去重
         unique_flown = []
         for p in flown_points:
             if not unique_flown or (p[0] != unique_flown[-1][0] or p[1] != unique_flown[-1][1]):
@@ -133,15 +137,17 @@ def create_flight_map(task):
             folium.PolyLine(flown_route, color='green', weight=4, opacity=0.9, popup="已飞路径").add_to(m)
 
     # 无人机当前位置（红色飞机图标）
-    folium.Marker(
-        location=[current_pos[1], current_pos[0]],
-        icon=folium.Icon(color='red', icon='plane', prefix='fa'),
-        popup=f"当前位置 ({current_pos[0]:.6f}, {current_pos[1]:.6f})"
-    ).add_to(m)
+    current_pos = get_current_position(task)
+    if current_pos:
+        folium.Marker(
+            location=[current_pos[1], current_pos[0]],
+            icon=folium.Icon(color='red', icon='plane', prefix='fa'),
+            popup=f"当前位置 ({current_pos[0]:.6f}, {current_pos[1]:.6f})"
+        ).add_to(m)
 
     # 起点和终点
-    folium.Marker([waypoints[0][1], waypoints[0][0]], icon=folium.Icon(color='green', icon='play'), popup="起飞点").add_to(m)
-    folium.Marker([waypoints[-1][1], waypoints[-1][0]], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
+    folium.Marker([task["waypoints"][0][1], task["waypoints"][0][0]], icon=folium.Icon(color='green', icon='play'), popup="起飞点").add_to(m)
+    folium.Marker([task["waypoints"][-1][1], task["waypoints"][-1][0]], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
     folium.LayerControl().add_to(m)
     return m
@@ -149,7 +155,7 @@ def create_flight_map(task):
 # ==================== 页面主体 ====================
 st.header("🚁 飞行实时画面 - 任务执行监控")
 
-# 初始化 session_state 中必要的键
+# 初始化 session_state
 if "flight_task" not in st.session_state:
     st.session_state.flight_task = None
 if "heartbeat_data" not in st.session_state:
@@ -157,7 +163,7 @@ if "heartbeat_data" not in st.session_state:
     st.session_state.seq = 0
     st.session_state.running = True
 
-# 获取航线规划中保存的航点
+# 获取航点
 waypoints = st.session_state.get("flight_waypoints", [])
 
 # 更新飞行任务
@@ -175,7 +181,8 @@ with col1:
             st.session_state.flight_task["active"] = True
             st.session_state.flight_task["start_time"] = time.time()
             st.session_state.flight_task["flown_distance"] = 0.0
-            st.session_state.flight_task["current_position"] = st.session_state.flight_task["waypoints"][0]
+            st.session_state.flight_task["current_seg_idx"] = 0
+            st.session_state.flight_task["completion"] = 0.0
             st.rerun()
         else:
             st.warning("请先在「航线规划」页面生成飞行航线")
@@ -185,18 +192,18 @@ with col2:
             st.session_state.flight_task["active"] = False
             st.rerun()
 
-# 每秒自动刷新页面
+# 每秒自动刷新页面（使飞机移动）
 st_autorefresh(interval=1000, key="flight_monitor")
 
 # 更新飞行任务状态
 if st.session_state.flight_task and st.session_state.flight_task.get("active"):
-    update_flight(st.session_state.flight_task)
+    update_flight_task(st.session_state.flight_task)
 
-# 显示监控指标
+# 显示飞行指标
 task = st.session_state.flight_task
 if task and task.get("waypoints"):
     total_wp = len(task["waypoints"])
-    current_seg = task["current_seg_idx"] + 1
+    current_seg = min(task["current_seg_idx"] + 1, total_wp)
     progress = task["completion"] * 100
     elapsed = time.time() - task["start_time"] if task.get("active") and task.get("start_time") else 0
     if not task.get("active") and task["completion"] >= 1.0:
@@ -226,24 +233,23 @@ if task and task.get("waypoints"):
     st.progress(progress/100.0, text=f"飞行进度 {progress:.1f}%")
     st.markdown("---")
 
-    # ==================== 左右布局：实时飞行地图（左） + 通信链路（右） ====================
+    # 左右布局：地图 + 链路
     left_col, right_col = st.columns([2, 1])
     with left_col:
-        st.subheader("🗺️ 实时飞行地图")
+        st.subheader("🗺️ 实时飞行地图（飞机将每秒移动）")
+        # 注意：每次刷新都会重建地图，但飞机位置会更新，闪烁无法避免。
         map_obj = create_flight_map(task)
-        st_folium(map_obj, width=700, height=500, key="real_time_map")
+        st_folium(map_obj, width=700, height=500, key="moving_map")
     with right_col:
         st.subheader("📡 通信链路拓扑与数据流")
-        # 参考图片样式：三个状态标签
         st.success("✅ GCS 在线")
         st.success("✅ OBC 在线")
         st.success("✅ FCU 在线")
-        # 也可以加入一些辅助信息，如信号强度等
         st.caption("数据链路正常 • 心跳间隔1s")
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
-# ==================== 原有心跳模拟器（保留） ====================
+# ==================== 心跳模拟器（保留） ====================
 st.markdown("---")
 st.subheader("📶 无人机心跳模拟器（背景监控）")
 
