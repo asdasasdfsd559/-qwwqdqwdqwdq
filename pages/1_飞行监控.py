@@ -114,28 +114,30 @@ def create_flight_map(task, obstacles):
         attr='高德-卫星', name='卫星图'
     ).add_to(m)
 
+    # 障碍物
     for ob in obstacles:
         points = [[p[1], p[0]] for p in ob['points']]
         folium.Polygon(locations=points, color='red', fill=True, fill_opacity=0.5, popup=ob['name']).add_to(m)
 
+    # 完整航线（蓝色）
     waypoints = task["waypoints"]
     route = [[lat, lng] for lng, lat in waypoints]
     folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
 
-    # 显示简化的航点（小圆点）
+    # 航点（紫色圆点） - 后绘制，覆盖在航线上
     display_pts = simplify_waypoints(waypoints, max_points=15)
     for i, (lng, lat) in enumerate(display_pts):
         folium.CircleMarker(
             location=[lat, lng],
             radius=3,
-            color='blue',
+            color='purple',
             fill=True,
-            fill_color='blue',
-            fill_opacity=0.6,
+            fill_color='purple',
+            fill_opacity=0.8,
             popup=f"航点 {i+1}"
         ).add_to(m)
 
-    # 已飞路径
+    # 已飞路径（绿色）
     flown_dist = task["flown_distance"]
     if flown_dist > 0:
         flown_points = []
@@ -160,6 +162,7 @@ def create_flight_map(task, obstacles):
         if len(unique) >= 2:
             folium.PolyLine([[lat, lng] for lng, lat in unique], color='green', weight=4, opacity=0.9, popup="已飞路径").add_to(m)
 
+    # 无人机当前位置（红色飞机）
     current_pos = get_current_position(task)
     if current_pos:
         folium.Marker(
@@ -168,6 +171,7 @@ def create_flight_map(task, obstacles):
             popup=f"当前位置 ({current_pos[0]:.6f}, {current_pos[1]:.6f})"
         ).add_to(m)
 
+    # 起点和终点
     folium.Marker([waypoints[0][1], waypoints[0][0]], icon=folium.Icon(color='green', icon='play'), popup="起飞点").add_to(m)
     folium.Marker([waypoints[-1][1], waypoints[-1][0]], icon=folium.Icon(color='red', icon='flag'), popup="降落点").add_to(m)
 
@@ -276,7 +280,7 @@ if task and task.get("waypoints"):
             elif i == len(display_pts)-1:
                 st.caption(f"🏁 终点 ({lng:.6f}, {lat:.6f})")
             else:
-                st.caption(f"📍 航点 {i+1}: ({lng:.6f}, {lat:.6f})")
+                st.caption(f"🟣 航点 {i+1}: ({lng:.6f}, {lat:.6f})")
         if len(task["waypoints"]) > len(display_pts):
             st.caption(f"... 共 {len(task['waypoints'])} 个航点，仅显示关键点")
 else:
