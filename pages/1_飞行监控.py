@@ -25,6 +25,18 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
+def simplify_waypoints_for_display(waypoints, max_points=15):
+    """简化航点用于显示，保留起点、终点和中间均匀采样的点"""
+    if len(waypoints) <= max_points:
+        return waypoints
+    # 均匀采样
+    step = (len(waypoints) - 1) / (max_points - 1)
+    indices = [int(round(i * step)) for i in range(max_points)]
+    # 确保最后一个点包含
+    if indices[-1] != len(waypoints) - 1:
+        indices[-1] = len(waypoints) - 1
+    return [waypoints[i] for i in indices]
+
 def init_flight_task(waypoints, speed=8.5):
     if not waypoints or len(waypoints) < 2:
         return None
@@ -116,6 +128,19 @@ def create_flight_map(task, obstacles):
     route = [[lat, lng] for lng, lat in waypoints]
     folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
 
+    # 显示简化后的航点（蓝色小圆点）—— 只显示关键点，避免过多
+    display_waypoints = simplify_waypoints_for_display(waypoints, max_points=15)
+    for i, (lng, lat) in enumerate(display_waypoints):
+        folium.CircleMarker(
+            location=[lat, lng],
+            radius=4,
+            color='blue',
+            fill=True,
+            fill_color='blue',
+            fill_opacity=0.7,
+            popup=f"航点 {i+1}"
+        ).add_to(m)
+
     # 已飞路径（绿色）
     flown_dist = task["flown_distance"]
     if flown_dist > 0:
@@ -184,9 +209,11 @@ if st.session_state.flight_task is None and waypoints and len(waypoints) >= 2:
     st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
 
 # 手动重载航线按钮
-if st.button("🔄 重新加载航线", use_container_width=False):
-    st.session_state.flight_task = None
-    st.rerun()
+col_btn1, col_btn2 = st.columns([1, 5])
+with col_btn1:
+    if st.button("🔄 重新加载航线", use_container_width=True):
+        st.session_state.flight_task = None
+        st.rerun()
 
 # 控制按钮
 col1, col2 = st.columns(2)
@@ -248,7 +275,7 @@ if task and task.get("waypoints"):
     st.progress(progress/100.0, text=f"飞行进度 {progress:.1f}%")
     st.markdown("---")
 
-    # 左右布局：地图（左） + 通信链路（右）
+    # 左右布局：地图（左） + 通信链路与航点列表（右）
     left_col, right_col = st.columns([2, 1])
     with left_col:
         st.subheader("🗺️ 实时飞行地图（每2秒刷新一次）")
@@ -260,6 +287,19 @@ if task and task.get("waypoints"):
         st.success("✅ OBC 在线")
         st.success("✅ FCU 在线")
         st.caption("数据链路正常 • 心跳间隔1s（后台）")
+        st.markdown("---")
+        st.subheader("📍 航点列表")
+        # 显示简化后的航点（避免列表过长）
+        display_waypoints = simplify_waypoints_for_display(task["waypoints"], max_points=15)
+        for i, (lng, lat) in enumerate(display_waypoints):
+            if i == 0:
+                st.caption(f"✈️ 起点 ({lng:.6f}, {lat:.6f})")
+            elif i == len(display_waypoints)-1:
+                st.caption(f"🏁 终点 ({lng:.6f}, {lat:.6f})")
+            else:
+                st.caption(f"📍 航点 {i+1}: ({lng:.6f}, {lat:.6f})")
+        if len(task["waypoints"]) > len(display_waypoints):
+            st.caption(f"... 共 {len(task['waypoints'])} 个航点，仅显示关键点")
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
