@@ -226,26 +226,24 @@ if task and task.get("waypoints"):
     st.progress(progress/100.0, text=f"飞行进度 {progress:.1f}%")
     st.markdown("---")
 
-    # 通信链路拓扑
-    st.subheader("📡 通信链路拓扑与数据流")
-    link_cols = st.columns(3)
-    # 模拟链路状态（可根据需要改为固定在线）
-    gcs_status = "✅ GCS 在线" if random.random() > 0.05 else "❌ GCS 离线"
-    obc_status = "✅ OBC 在线" if random.random() > 0.05 else "❌ OBC 离线"
-    fcu_status = "✅ FCU 在线" if random.random() > 0.05 else "❌ FCU 离线"
-    link_cols[0].success(gcs_status) if "✅" in gcs_status else link_cols[0].error(gcs_status)
-    link_cols[1].success(obc_status) if "✅" in obc_status else link_cols[1].error(obc_status)
-    link_cols[2].success(fcu_status) if "✅" in fcu_status else link_cols[2].error(fcu_status)
-    st.markdown("---")
-
-    # 实时飞行地图
-    st.subheader("🗺️ 实时飞行地图")
-    map_obj = create_flight_map(task)
-    st_folium(map_obj, width=1100, height=500, key="real_time_map")
+    # ==================== 左右布局：实时飞行地图（左） + 通信链路（右） ====================
+    left_col, right_col = st.columns([2, 1])
+    with left_col:
+        st.subheader("🗺️ 实时飞行地图")
+        map_obj = create_flight_map(task)
+        st_folium(map_obj, width=700, height=500, key="real_time_map")
+    with right_col:
+        st.subheader("📡 通信链路拓扑与数据流")
+        # 参考图片样式：三个状态标签
+        st.success("✅ GCS 在线")
+        st.success("✅ OBC 在线")
+        st.success("✅ FCU 在线")
+        # 也可以加入一些辅助信息，如信号强度等
+        st.caption("数据链路正常 • 心跳间隔1s")
 else:
     st.info("暂无飞行航线，请前往「航线规划」页面绘制障碍物并生成航线")
 
-# ------------------ 原有心跳模拟器（保留） ------------------
+# ==================== 原有心跳模拟器（保留） ====================
 st.markdown("---")
 st.subheader("📶 无人机心跳模拟器（背景监控）")
 
