@@ -16,7 +16,6 @@ def get_beijing_time_str():
     return datetime.now(BEIJING_TZ).strftime("%H:%M:%S")
 
 def haversine(lon1, lat1, lon2, lat2):
-    """计算两点距离（米）"""
     R = 6371000
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
@@ -26,21 +25,6 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
     return R * c
 
-def interpolate_position(waypoints, seg_distances, flown):
-    """根据已飞距离（米）计算当前经纬度（线性插值）"""
-    cumulative = 0.0
-    for i, d in enumerate(seg_distances):
-        if cumulative + d >= flown:
-            ratio = (flown - cumulative) / d if d > 0 else 1.0
-            w1 = waypoints[i]
-            w2 = waypoints[i+1]
-            lng = w1[0] + (w2[0] - w1[0]) * ratio
-            lat = w1[1] + (w2[1] - w1[1]) * ratio
-            return (lng, lat), i
-        cumulative += d
-    return waypoints[-1], len(waypoints)-2
-
-# ==================== 初始化飞行任务 ====================
 def init_flight_task(waypoints, speed=8.5):
     if not waypoints or len(waypoints) < 2:
         return None
@@ -89,7 +73,6 @@ def update_flight(task):
             return
         cumulative += d
 
-# ==================== 创建实时飞行地图 ====================
 def create_flight_map(task):
     if not task or not task["waypoints"]:
         m = folium.Map(location=[32.234097, 118.749413], zoom_start=16, control_scale=True)
@@ -166,14 +149,22 @@ def create_flight_map(task):
 # ==================== 页面主体 ====================
 st.header("🚁 飞行实时画面 - 任务执行监控")
 
+# 初始化 session_state 中必要的键
+if "flight_task" not in st.session_state:
+    st.session_state.flight_task = None
+if "heartbeat_data" not in st.session_state:
+    st.session_state.heartbeat_data = []
+    st.session_state.seq = 0
+    st.session_state.running = True
+
 # 获取航线规划中保存的航点
 waypoints = st.session_state.get("flight_waypoints", [])
 
-# 初始化或更新飞行任务
-if "flight_task" not in st.session_state or st.session_state.flight_task is None:
+# 更新飞行任务
+if st.session_state.flight_task is None:
     if waypoints and len(waypoints) >= 2:
         st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
-elif st.session_state.flight_task and st.session_state.flight_task["waypoints"] != waypoints:
+elif st.session_state.flight_task and st.session_state.flight_task.get("waypoints") != waypoints:
     st.session_state.flight_task = init_flight_task(waypoints, speed=8.5)
 
 # 控制按钮
@@ -198,17 +189,17 @@ with col2:
 st_autorefresh(interval=1000, key="flight_monitor")
 
 # 更新飞行任务状态
-if st.session_state.flight_task and st.session_state.flight_task["active"]:
+if st.session_state.flight_task and st.session_state.flight_task.get("active"):
     update_flight(st.session_state.flight_task)
 
 # 显示监控指标
 task = st.session_state.flight_task
-if task and task["waypoints"]:
+if task and task.get("waypoints"):
     total_wp = len(task["waypoints"])
     current_seg = task["current_seg_idx"] + 1
     progress = task["completion"] * 100
-    elapsed = time.time() - task["start_time"] if task["active"] and task["start_time"] else 0
-    if not task["active"] and task["completion"] >= 1.0:
+    elapsed = time.time() - task["start_time"] if task.get("active") and task.get("start_time") else 0
+    if not task.get("active") and task["completion"] >= 1.0:
         elapsed = task["total_distance"] / task["speed"]
     remaining_dist = max(0, task["total_distance"] - task["flown_distance"])
     remaining_time = remaining_dist / task["speed"] if task["speed"] > 0 else 0
@@ -238,7 +229,7 @@ if task and task["waypoints"]:
     # 通信链路拓扑
     st.subheader("📡 通信链路拓扑与数据流")
     link_cols = st.columns(3)
-    # 模拟链路状态（可根据实际需求改为固定在线）
+    # 模拟链路状态（可根据需要改为固定在线）
     gcs_status = "✅ GCS 在线" if random.random() > 0.05 else "❌ GCS 离线"
     obc_status = "✅ OBC 在线" if random.random() > 0.05 else "❌ OBC 离线"
     fcu_status = "✅ FCU 在线" if random.random() > 0.05 else "❌ FCU 离线"
@@ -257,10 +248,6 @@ else:
 # ------------------ 原有心跳模拟器（保留） ------------------
 st.markdown("---")
 st.subheader("📶 无人机心跳模拟器（背景监控）")
-if "heartbeat_data" not in st.session_state:
-    st.session_state.heartbeat_data = []
-    st.session_state.seq = 0
-    st.session_state.running = True
 
 col_h1, col_h2 = st.columns(2)
 with col_h1:
