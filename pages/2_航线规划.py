@@ -188,7 +188,7 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         return [start, end]
 
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
-    m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("zoom", 19),
+    m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("map_zoom", 19),
                    control_scale=True, tiles=None)
 
     folium.TileLayer(
@@ -216,7 +216,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
 
     if len(waypoints) >= 2:
         safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode)
-        # 保存航点供飞行监控使用
         st.session_state.flight_waypoints = safe_path.copy()
         st.session_state.obstacles = obstacles
         route = []
@@ -363,7 +362,7 @@ with st.sidebar:
         save_state()
         st.rerun()
 
-# ==================== 地图显示 ====================
+# ==================== 地图显示（自动保存视图，无自动刷新） ====================
 st.header("🗺️ 航线规划")
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
@@ -380,10 +379,12 @@ m = create_map(
 )
 output = st_folium(m, width=1100, height=680, key="main_map")
 
+# 保存当前地图视图（中心和缩放）
 if output and output.get("center") and output.get("zoom"):
     st.session_state.map_center = (output["center"]["lng"], output["center"]["lat"])
     st.session_state.map_zoom = output["zoom"]
 
+# 处理地图点击打点
 if output and output.get("last_clicked"):
     lat = output["last_clicked"]["lat"]
     lng = output["last_clicked"]["lng"]
