@@ -22,7 +22,8 @@ SAFE_BUFFER = 0.00015
 def get_obstacle_with_buffer(obs_poly):
     return obs_poly.buffer(SAFE_BUFFER)
 
-def simplify_vertices(vertices, max_vertices=10):
+def simplify_vertices(vertices, max_vertices=6):
+    """对顶点列表进行均匀精简，保留首尾"""
     if len(vertices) <= max_vertices:
         return vertices
     step = (len(vertices) - 1) / (max_vertices - 1)
@@ -30,27 +31,12 @@ def simplify_vertices(vertices, max_vertices=10):
     return [vertices[i] for i in indices]
 
 def plan_safe_path(start, end, obstacles, fly_mode):
-    # 直飞最短
-    if fly_mode == "直飞最短":
+    # 直飞最短 和 弧线最短航线 都只返回起点终点
+    if fly_mode in ["直飞最短", "弧线最短航线"]:
         return [start, end]
-    # 无障碍
+
+    # 无任何障碍物时，左右绕飞也返回直线
     if not obstacles:
-        if fly_mode == "弧线最短航线":
-            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
-            dx, dy = end[0]-start[0], end[1]-start[1]
-            perp = (-dy, dx)
-            length = math.hypot(*perp)
-            if length > 0:
-                perp = (perp[0]/length, perp[1]/length)
-            offset = 0.0002
-            cx += perp[0]*offset
-            cy += perp[1]*offset
-            points = []
-            for t in [i/10 for i in range(11)]:
-                x = (1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0]
-                y = (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]
-                points.append((x, y))
-            return points
         return [start, end]
 
     obstacle = obstacles[0]
@@ -58,26 +44,12 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     buffered = get_obstacle_with_buffer(obs_poly)
     direct_line = LineString([start, end])
 
+    # 直线不与缓冲区相交，无需绕飞
     if not direct_line.intersects(buffered):
-        if fly_mode == "弧线最短航线":
-            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
-            dx, dy = end[0]-start[0], end[1]-start[1]
-            perp = (-dy, dx)
-            length = math.hypot(*perp)
-            if length > 0:
-                perp = (perp[0]/length, perp[1]/length)
-            offset = 0.0002
-            cx += perp[0]*offset
-            cy += perp[1]*offset
-            points = []
-            for t in [i/10 for i in range(11)]:
-                x = (1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0]
-                y = (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]
-                points.append((x, y))
-            return points
         return [start, end]
 
-    # 需要绕飞：获取交点
+    # ---------- 需要绕飞 ----------
+    # 获取直线与缓冲区的交点
     inter = direct_line.intersection(buffered.boundary)
     if inter.geom_type == 'MultiPoint':
         pts = list(inter.geoms)
@@ -86,11 +58,12 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     if len(pts) < 2:
         return [start, end]
 
+    # 入口（离起点近）和出口
     d1 = math.hypot(pts[0].x - start[0], pts[0].y - start[1])
     d2 = math.hypot(pts[1].x - start[0], pts[1].y - start[1])
     entry, exit_pt = (pts[0], pts[1]) if d1 < d2 else (pts[1], pts[0])
 
-    # 获取缓冲区边界顶点并去重
+    # 获取缓冲区边界顶点（去重）
     boundary_coords = list(buffered.exterior.coords)
     unique = []
     for p in boundary_coords:
@@ -110,14 +83,15 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     e_idx = nearest_idx(entry)
     x_idx = nearest_idx(exit_pt)
 
-    # 顺时针序列
+    # 顺时针序列（索引递增）
     cw = []
     i = e_idx
     while i != x_idx:
         cw.append(unique[i])
         i = (i + 1) % n
     cw.append(unique[x_idx])
-    # 逆时针序列
+
+    # 逆时针序列（索引递减）
     ccw = []
     i = e_idx
     while i != x_idx:
@@ -125,27 +99,20 @@ def plan_safe_path(start, end, obstacles, fly_mode):
         i = (i - 1) % n
     ccw.append(unique[x_idx])
 
-    # 选择方向
+    # 根据模式选择方向（左侧绕飞=顺时针，右侧绕飞=逆时针）
     if fly_mode == "左侧绕飞":
-        chosen = ccw
-    elif fly_mode == "右侧绕飞":
         chosen = cw
-    else:  # 弧线最短航线
-        chosen = cw if len(cw) <= len(ccw) else ccw
+    elif fly_mode == "右侧绕飞":
+        chosen = ccw
+    else:
+        # 其他情况（不应发生）默认顺时针
+        chosen = cw
 
-    # 精简顶点数不超过10个
-    chosen = simplify_vertices(chosen, max_vertices=10)
+    # 精简顶点数（最多6个中间点）
+    chosen = simplify_vertices(chosen, max_vertices=6)
 
     # 构建最终路径
     path = [start] + chosen + [end]
-    # 最后再整体保证不超过15个点（直飞除外）
-    if fly_mode != "直飞最短" and len(path) > 15:
-        # 使用距离均匀采样再压缩
-        # 简单处理：每隔一个点取一个
-        step = max(1, (len(path)-1) // 12)
-        path = [path[i] for i in range(0, len(path), step)]
-        if path[-1] != end:
-            path.append(end)
     return path
 
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
@@ -320,7 +287,7 @@ with st.sidebar:
         save_state()
         st.rerun()
 
-st.header("🗺️ 航线规划（航点数已精简 ≤15）")
+st.header("🗺️ 航线规划（航点已极致精简，弧线仅为直线）")
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
 
