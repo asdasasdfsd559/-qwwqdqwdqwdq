@@ -4,7 +4,7 @@ import os
 import math
 import folium
 from streamlit_folium import st_folium
-from shapely.geometry import Point, LineString, Polygon, LinearRing
+from shapely.geometry import Point, LineString, Polygon
 
 st.set_page_config(page_title="航线规划", layout="wide")
 
@@ -17,96 +17,40 @@ class CoordTransform:
     def gcj02_to_wgs84(lng, lat):
         return lng - 0.0005, lat - 0.0003
 
-# ==================== 几何辅助 ====================
 SAFE_BUFFER = 0.00015
 
 def get_obstacle_with_buffer(obs_poly):
     return obs_poly.buffer(SAFE_BUFFER)
 
-def get_polyline_around_path(start, end, obstacle, fly_mode):
-    """返回障碍物缓冲区的顶点序列（绕飞路径）"""
-    obs_poly = Polygon(obstacle['points'])
-    buffered = get_obstacle_with_buffer(obs_poly)
-    vertices = list(buffered.exterior.coords)
-    start_pt = Point(start)
-    end_pt = Point(end)
-    def get_nearest_point(pt, points):
-        min_dist = float('inf')
-        nearest = None
-        for p in points:
-            dist = pt.distance(Point(p))
-            if dist < min_dist:
-                min_dist = dist
-                nearest = p
-        return nearest
-    start_nearest = get_nearest_point(start_pt, vertices)
-    end_nearest = get_nearest_point(end_pt, vertices)
-    start_idx = vertices.index(start_nearest)
-    end_idx = vertices.index(end_nearest)
-    n = len(vertices)
-    if fly_mode == "左侧绕飞":
-        if start_idx < end_idx:
-            polyline = vertices[start_idx:end_idx+1]
-        else:
-            polyline = vertices[start_idx:] + vertices[:end_idx+1]
-    else:  # 右侧绕飞
-        if start_idx > end_idx:
-            polyline = vertices[end_idx:start_idx+1][::-1]
-        else:
-            polyline = (vertices[end_idx:] + vertices[:start_idx+1])[::-1]
-    # 去重（相邻重复）
-    unique = []
-    for p in polyline:
-        if not unique or (p[0] != unique[-1][0] or p[1] != unique[-1][1]):
-            unique.append(p)
-    return unique
-
-def get_smooth_around_path(start, end, obstacle):
-    """弧线最短航线：沿缓冲区采样（点数少）"""
-    obs_poly = Polygon(obstacle['points'])
-    buffered = get_obstacle_with_buffer(obs_poly)
-    ring = LinearRing(buffered.exterior.coords)
-    start_pt = Point(start)
-    end_pt = Point(end)
-    start_dist = ring.project(start_pt)
-    end_dist = ring.project(end_pt)
-    ring_len = ring.length
-    cw_dist = (end_dist - start_dist) % ring_len
-    ccw_dist = (start_dist - end_dist) % ring_len
-    # 采样点数降低到15
-    num_points = 15
-    if cw_dist <= ccw_dist:
-        distances = [start_dist + i * cw_dist / num_points for i in range(num_points + 1)]
-        distances = [d % ring_len for d in distances]
-    else:
-        distances = [start_dist - i * ccw_dist / num_points for i in range(num_points + 1)]
-        distances = [d % ring_len for d in distances]
-    around_points = []
-    for d in distances:
-        p = ring.interpolate(d)
-        around_points.append((p.x, p.y))
-    return around_points
+def simplify_vertices(vertices, max_vertices=10):
+    if len(vertices) <= max_vertices:
+        return vertices
+    step = (len(vertices) - 1) / (max_vertices - 1)
+    indices = [int(round(i * step)) for i in range(max_vertices - 1)] + [len(vertices) - 1]
+    return [vertices[i] for i in indices]
 
 def plan_safe_path(start, end, obstacles, fly_mode):
-    """生成航点序列（数量尽可能少）"""
     # 直飞最短
     if fly_mode == "直飞最短":
         return [start, end]
-
+    # 无障碍
     if not obstacles:
-        # 无障碍物弧线模式：生成简单贝塞尔曲线，采样30个点（也不多）
         if fly_mode == "弧线最短航线":
-            mid_x, mid_y = (start[0]+end[0])/2, (start[1]+end[1])/2
+            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
             dx, dy = end[0]-start[0], end[1]-start[1]
             perp = (-dy, dx)
             length = math.hypot(*perp)
             if length > 0:
                 perp = (perp[0]/length, perp[1]/length)
             offset = 0.0002
-            cx, cy = mid_x + perp[0]*offset, mid_y + perp[1]*offset
-            # 降低采样点到20
-            return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
-                     (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/20 for i in range(21)]]
+            cx += perp[0]*offset
+            cy += perp[1]*offset
+            points = []
+            for t in [i/10 for i in range(11)]:
+                x = (1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0]
+                y = (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]
+                points.append((x, y))
+            return points
         return [start, end]
 
     obstacle = obstacles[0]
@@ -115,35 +59,94 @@ def plan_safe_path(start, end, obstacles, fly_mode):
     direct_line = LineString([start, end])
 
     if not direct_line.intersects(buffered):
-        # 直线不与缓冲区相交，无需绕飞
         if fly_mode == "弧线最短航线":
-            mid_x, mid_y = (start[0]+end[0])/2, (start[1]+end[1])/2
+            cx, cy = (start[0]+end[0])/2, (start[1]+end[1])/2
             dx, dy = end[0]-start[0], end[1]-start[1]
             perp = (-dy, dx)
             length = math.hypot(*perp)
             if length > 0:
                 perp = (perp[0]/length, perp[1]/length)
             offset = 0.0002
-            cx, cy = mid_x + perp[0]*offset, mid_y + perp[1]*offset
-            return [((1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0],
-                     (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]) for t in [i/20 for i in range(21)]]
+            cx += perp[0]*offset
+            cy += perp[1]*offset
+            points = []
+            for t in [i/10 for i in range(11)]:
+                x = (1-t)**2*start[0] + 2*(1-t)*t*cx + t**2*end[0]
+                y = (1-t)**2*start[1] + 2*(1-t)*t*cy + t**2*end[1]
+                points.append((x, y))
+            return points
         return [start, end]
 
-    # 需要绕飞
-    if fly_mode == "左侧绕飞" or fly_mode == "右侧绕飞":
-        polyline = get_polyline_around_path(start, end, obstacle, fly_mode)
-        return [start] + polyline + [end]
-    elif fly_mode == "弧线最短航线":
-        around = get_smooth_around_path(start, end, obstacle)
-        # 对采样点进行简单的贝塞尔平滑，但点数仍然较少
-        if len(around) < 3:
-            return [start] + around + [end]
-        # 简单调用 Catmull-Rom 平滑，但使用较低的分段数
-        from scipy.interpolate import CubicSpline  # 避免循环依赖，这里不用，直接返回采样点
-        # 直接返回采样点（已足够平滑）
-        return [start] + around + [end]
+    # 需要绕飞：获取交点
+    inter = direct_line.intersection(buffered.boundary)
+    if inter.geom_type == 'MultiPoint':
+        pts = list(inter.geoms)
     else:
+        pts = [inter] if not inter.is_empty else []
+    if len(pts) < 2:
         return [start, end]
+
+    d1 = math.hypot(pts[0].x - start[0], pts[0].y - start[1])
+    d2 = math.hypot(pts[1].x - start[0], pts[1].y - start[1])
+    entry, exit_pt = (pts[0], pts[1]) if d1 < d2 else (pts[1], pts[0])
+
+    # 获取缓冲区边界顶点并去重
+    boundary_coords = list(buffered.exterior.coords)
+    unique = []
+    for p in boundary_coords:
+        if not unique or (p[0] != unique[-1][0] or p[1] != unique[-1][1]):
+            unique.append(p)
+    n = len(unique)
+
+    def nearest_idx(pt):
+        min_d = float('inf')
+        idx = 0
+        for i, p in enumerate(unique):
+            d = math.hypot(p[0] - pt.x, p[1] - pt.y)
+            if d < min_d:
+                min_d = d
+                idx = i
+        return idx
+    e_idx = nearest_idx(entry)
+    x_idx = nearest_idx(exit_pt)
+
+    # 顺时针序列
+    cw = []
+    i = e_idx
+    while i != x_idx:
+        cw.append(unique[i])
+        i = (i + 1) % n
+    cw.append(unique[x_idx])
+    # 逆时针序列
+    ccw = []
+    i = e_idx
+    while i != x_idx:
+        ccw.append(unique[i])
+        i = (i - 1) % n
+    ccw.append(unique[x_idx])
+
+    # 选择方向
+    if fly_mode == "左侧绕飞":
+        chosen = ccw
+    elif fly_mode == "右侧绕飞":
+        chosen = cw
+    else:  # 弧线最短航线
+        chosen = cw if len(cw) <= len(ccw) else ccw
+
+    # 精简顶点数不超过10个
+    chosen = simplify_vertices(chosen, max_vertices=10)
+
+    # 构建最终路径
+    path = [start] + chosen + [end]
+    # 最后再整体保证不超过15个点（直飞除外）
+    if fly_mode != "直飞最短" and len(path) > 15:
+        # 使用距离均匀采样再压缩
+        # 简单处理：每隔一个点取一个
+        step = max(1, (len(path)-1) // 12)
+        path = [path[i] for i in range(0, len(path), step)]
+        if path[-1] != end:
+            path.append(end)
+    return path
 
 def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstacles, coord_system, temp_points, fly_mode):
     m = folium.Map(location=[center_lat, center_lng], zoom_start=st.session_state.get("map_zoom", 19),
@@ -174,7 +177,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
 
     if len(waypoints) >= 2:
         safe_path = plan_safe_path(waypoints[0], waypoints[-1], obstacles, fly_mode)
-        # 保存航点供飞行监控使用
         st.session_state.flight_waypoints = safe_path.copy()
         st.session_state.obstacles = obstacles
         route = []
@@ -200,7 +202,6 @@ def create_map(center_lng, center_lat, waypoints, home_point, land_point, obstac
     folium.LayerControl().add_to(m)
     return m
 
-# ==================== 状态持久化 ====================
 STATE_FILE = "ground_station_state.json"
 def save_state():
     state = {
@@ -223,7 +224,6 @@ def load_state():
             return json.load(f)
     return None
 
-# ==================== 初始化 ====================
 if "home_point" not in st.session_state:
     loaded = load_state()
     OFFICIAL_LNG, OFFICIAL_LAT = 118.749413, 32.234097
@@ -245,7 +245,6 @@ if "home_point" not in st.session_state:
         else:
             st.session_state[k] = v
 
-# ==================== 侧边栏 ====================
 with st.sidebar:
     st.title("🎮 无人机地面站")
     st.markdown("**南京科技职业学院**")
@@ -321,8 +320,7 @@ with st.sidebar:
         save_state()
         st.rerun()
 
-# ==================== 地图显示 ====================
-st.header("🗺️ 航线规划")
+st.header("🗺️ 航线规划（航点数已精简 ≤15）")
 center = st.session_state.get("map_center", st.session_state.home_point)
 zoom = st.session_state.get("map_zoom", 19)
 
