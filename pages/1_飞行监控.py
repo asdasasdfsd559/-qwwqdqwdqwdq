@@ -39,10 +39,8 @@ def simplify_waypoints_by_distance(waypoints, max_points=12):
         d = haversine(waypoints[i-1][1], waypoints[i-1][0], waypoints[i][1], waypoints[i][0])
         distances.append(distances[-1] + d)
     total = distances[-1]
-    # 产生均匀间隔的距离值
     step = total / (max_points - 1)
     target_dists = [i * step for i in range(max_points)]
-    # 插值找到对应点
     sampled = []
     j = 0
     for td in target_dists:
@@ -53,10 +51,7 @@ def simplify_waypoints_by_distance(waypoints, max_points=12):
         else:
             d0 = distances[j]
             d1 = distances[j+1]
-            if d1 - d0 == 0:
-                ratio = 0
-            else:
-                ratio = (td - d0) / (d1 - d0)
+            ratio = (td - d0) / (d1 - d0) if d1 > d0 else 0
             p0 = waypoints[j]
             p1 = waypoints[j+1]
             lng = p0[0] + (p1[0] - p0[0]) * ratio
@@ -154,7 +149,7 @@ def create_flight_map(task, obstacles):
     route = [[lat, lng] for lng, lat in waypoints]
     folium.PolyLine(route, color='blue', weight=4, opacity=0.8, popup="规划航线").add_to(m)
 
-    # 基于距离均匀采样的航点（紫色圆点）
+    # 均匀采样的航点（紫色圆点，最多12个）
     display_pts = simplify_waypoints_by_distance(waypoints, max_points=12)
     for i, (lng, lat) in enumerate(display_pts):
         folium.CircleMarker(
@@ -302,7 +297,7 @@ if task and task.get("waypoints"):
         st.success("✅ FCU 在线")
         st.caption("数据链路正常 • 心跳间隔1s（后台）")
         st.markdown("---")
-        st.subheader("📍 航点列表（均匀采样）")
+        st.subheader("📍 航点列表（均匀采样，最多12个）")
         display_pts = simplify_waypoints_by_distance(task["waypoints"], max_points=12)
         for i, (lng, lat) in enumerate(display_pts):
             if i == 0:
